@@ -17,7 +17,11 @@ contextBridge.exposeInMainWorld('api', {
   addProject: (path) => ipcRenderer.invoke('add-project', path),
   removeProject: (id) => ipcRenderer.invoke('remove-project', id),
   loadProjectConfig: (path) => ipcRenderer.invoke('load-project-config', path),
-  saveProjectConfig: (path, config) => ipcRenderer.invoke('save-project-config', { folderPath: path, config })
+  saveProjectConfig: (path, config) => ipcRenderer.invoke('save-project-config', { folderPath: path, config }),
+
+  // Node.js Manager
+  checkNode: () => ipcRenderer.invoke('check-node-install'),
+  installNode: () => ipcRenderer.invoke('install-node')
 });
 
 contextBridge.exposeInMainWorld('versions', {

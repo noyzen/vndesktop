@@ -145,6 +145,39 @@ async function verifyPhp(rootDir) {
   });
 }
 
+// --- NODE.JS / BUILD ENGINE HELPERS ---
+
+function getLocalNodePath() {
+    const baseDir = path.join(app.getPath('userData'), 'node-env');
+    if (!fs.existsSync(baseDir)) return null;
+    
+    try {
+        const dirs = fs.readdirSync(baseDir);
+        // Search for extracted folder containing node.exe
+        // Usually node-vXX.XX.X-win-x64
+        for (const d of dirs) {
+            const fullPath = path.join(baseDir, d);
+            if (fs.lstatSync(fullPath).isDirectory()) {
+                const nodeExe = path.join(fullPath, 'node.exe');
+                if (fs.existsSync(nodeExe)) return fullPath;
+            }
+        }
+    } catch (e) {
+        return null;
+    }
+    return null;
+}
+
+function getBuildEnv() {
+    const local = getLocalNodePath();
+    const env = { ...process.env };
+    if (local) {
+        // Prepend local node path to PATH so it takes precedence
+        env.PATH = local + path.delimiter + env.PATH;
+    }
+    return env;
+}
+
 // --- PROJECT MANAGER PERSISTENCE ---
 
 const projectsFile = path.join(app.getPath('userData'), 'projects.json');
@@ -162,14 +195,44 @@ function saveProjectsList(list) {
   fs.writeFileSync(projectsFile, JSON.stringify(list, null, 2));
 }
 
+// --- WINDOW STATE PERSISTENCE ---
+
+const windowStateFile = path.join(app.getPath('userData'), 'main-window-state.json');
+
+function getWindowState() {
+  try {
+    if (fs.existsSync(windowStateFile)) {
+      return JSON.parse(fs.readFileSync(windowStateFile, 'utf8'));
+    }
+  } catch (e) {}
+  return { width: 1200, height: 900 }; // Defaults
+}
+
+function saveWindowState(win) {
+  if (!win) return;
+  try {
+    const bounds = win.getBounds();
+    const state = {
+      ...bounds,
+      maximized: win.isMaximized()
+    };
+    fs.writeFileSync(windowStateFile, JSON.stringify(state));
+  } catch (e) {}
+}
+
+
 // --- MAIN PROCESS ---
 
 let mainWindow;
 
 const createWindow = () => {
+  const state = getWindowState();
+
   mainWindow = new BrowserWindow({
-    width: 1200,
-    height: 900,
+    width: state.width,
+    height: state.height,
+    x: state.x,
+    y: state.y,
     minWidth: 900,
     minHeight: 600,
     backgroundColor: '#121212',
@@ -183,8 +246,14 @@ const createWindow = () => {
     icon: path.join(__dirname, 'public/appicon.png')
   });
 
+  if (state.maximized) mainWindow.maximize();
+
   mainWindow.loadFile('index.html');
   mainWindow.setMenu(null); 
+
+  mainWindow.on('close', () => {
+      saveWindowState(mainWindow);
+  });
 };
 
 app.on('ready', createWindow);
@@ -289,6 +358,7 @@ ipcMain.handle('save-project-config', async (e, { folderPath, config }) => {
   }
 });
 
+// PHP Handlers
 ipcMain.handle('get-php-cache', async () => {
     const cacheDir = path.join(app.getPath('userData'), 'php-cache');
     const results = {};
@@ -349,6 +419,69 @@ ipcMain.handle('download-php', async (event, version) => {
     return { success: false, error: error.message };
   }
 });
+
+// --- NODE.JS HANDLERS ---
+
+ipcMain.handle('check-node-install', async () => {
+    const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+    const env = getBuildEnv();
+    
+    return new Promise((resolve) => {
+        exec(`${npmCmd} -v`, { env }, (err, stdout) => {
+            if (err) {
+                // Not found
+                resolve({ installed: false, local: false });
+            } else {
+                const localPath = getLocalNodePath();
+                resolve({ 
+                    installed: true, 
+                    version: stdout.trim(), 
+                    local: !!localPath,
+                    path: localPath || 'Global'
+                });
+            }
+        });
+    });
+});
+
+ipcMain.handle('install-node', async () => {
+    const nodeDir = path.join(app.getPath('userData'), 'node-env');
+    if (!fs.existsSync(nodeDir)) fs.mkdirSync(nodeDir, { recursive: true });
+    
+    const version = 'v20.18.0'; // LTS Iron
+    const filename = `node-${version}-win-x64.zip`;
+    const url = `https://nodejs.org/dist/${version}/${filename}`;
+    const zipPath = path.join(nodeDir, filename);
+    
+    try {
+        mainWindow.webContents.send('download-progress', { percent: 0, status: 'Connecting to nodejs.org...' });
+        
+        await downloadFile(url, zipPath, (percent, current, total) => {
+            mainWindow.webContents.send('download-progress', { percent, current, total, status: 'Downloading Node.js (Portable)...' });
+        });
+        
+        mainWindow.webContents.send('download-progress', { percent: 100, status: 'Extracting Engine...' });
+        
+        // Clean old
+        const items = fs.readdirSync(nodeDir);
+        for(const i of items) {
+            if(i !== filename) fs.rmSync(path.join(nodeDir, i), { recursive: true, force: true });
+        }
+        
+        await extractZip(zipPath, nodeDir);
+        
+        // Verify
+        const local = getLocalNodePath();
+        if (!local) throw new Error("Extraction verification failed.");
+        
+        return { success: true, path: local };
+    } catch(e) {
+        return { success: false, error: e.message };
+    }
+});
+
+
+// --- GENERATE & BUILD ---
 
 ipcMain.handle('generate-app', async (event, config) => {
   try {
@@ -435,14 +568,21 @@ ipcMain.handle('build-app', async (event, sourceRoot) => {
             return resolve({ success: false, error: 'vnbuild not found. Generate config first.' });
         }
 
-        exec(`${npmCmd} -v`, (err) => {
+        // Determine Environment (Local Node or Global)
+        const buildEnv = getBuildEnv();
+        const localPath = getLocalNodePath();
+        
+        if (localPath) sendLog('Using Local Node.js Engine: ' + localPath);
+        else sendLog('Using Global Node.js Environment');
+
+        exec(`${npmCmd} -v`, { env: buildEnv }, (err) => {
             if (err) {
-                sendLog('Node.js/NPM not found in PATH.', true);
+                sendLog('Node.js/NPM not found. Please install Node.js in the Build tab.', true);
                 return resolve({ success: false, error: 'NPM not found' });
             }
 
             sendLog(`Installing dependencies in ${buildDir}...`);
-            const install = spawn(npmCmd, ['install'], { cwd: buildDir, shell: true });
+            const install = spawn(npmCmd, ['install'], { cwd: buildDir, shell: true, env: buildEnv });
 
             install.stdout.on('data', (d) => sendLog(d.toString()));
             install.stderr.on('data', (d) => sendLog(d.toString()));
@@ -454,7 +594,7 @@ ipcMain.handle('build-app', async (event, sourceRoot) => {
                 }
                 
                 sendLog('Building application...');
-                const build = spawn(npmCmd, ['run', 'build'], { cwd: buildDir, shell: true });
+                const build = spawn(npmCmd, ['run', 'build'], { cwd: buildDir, shell: true, env: buildEnv });
                 
                 build.stdout.on('data', (d) => sendLog(d.toString()));
                 build.stderr.on('data', (d) => sendLog(d.toString()));
@@ -464,6 +604,40 @@ ipcMain.handle('build-app', async (event, sourceRoot) => {
                         sendLog(`Build failed: code ${bCode}`, true);
                         return resolve({ success: false, error: 'Build failed' });
                     }
+
+                    // --- CLEANUP DIST FOLDER ---
+                    try {
+                        sendLog('Cleaning up output artifacts...');
+                        const configFile = path.join(buildDir, 'visualneo.json');
+                        const distPath = path.join(buildDir, 'dist');
+                        const junkExtensions = ['.yml', '.yaml', '.blockmap'];
+                        let config = {};
+                        
+                        if (fs.existsSync(configFile)) {
+                            config = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+                        }
+
+                        if (fs.existsSync(distPath)) {
+                            const files = fs.readdirSync(distPath);
+                            files.forEach(f => {
+                                const fullPath = path.join(distPath, f);
+                                
+                                // 1. Remove Debug/Update metadata files
+                                if (junkExtensions.some(ext => f.endsWith(ext))) {
+                                    fs.rmSync(fullPath, { force: true });
+                                }
+
+                                // 2. Remove unpacked folder if not requested
+                                if (f === 'win-unpacked' && !config.targetUnpacked) {
+                                    fs.rmSync(fullPath, { recursive: true, force: true });
+                                }
+                            });
+                        }
+                    } catch(e) {
+                        sendLog('Cleanup warning: ' + e.message, false);
+                    }
+                    // ---------------------------
+
                     sendLog('Build Success!');
                     resolve({ success: true });
                 });

@@ -170,6 +170,8 @@ tabs.forEach(tab => {
     
     const icon = tabIcons[target] || '';
     headerTitle.innerHTML = `${icon} ${tab.innerText.trim()}`;
+
+    if (target === 'build') checkNodeStatus();
   });
 });
 
@@ -271,6 +273,50 @@ function toggleExtension(ext) {
   else selectedExtensions.add(ext);
   renderExtensions();
 }
+
+// --- NODE.JS CHECKER ---
+async function checkNodeStatus() {
+    const statusBox = document.getElementById('nodeStatusBox');
+    const statusText = document.getElementById('nodeStatusText');
+    const btnInstall = document.getElementById('btnInstallNode');
+    
+    statusText.innerText = "Checking environment...";
+    
+    try {
+        const res = await window.api.checkNode();
+        if (res.installed) {
+            statusBox.classList.remove('missing');
+            statusBox.classList.add('ready');
+            statusText.innerHTML = `<i class="fa-solid fa-check-circle" style="color:#4ade80"></i> Ready (${res.version}) - Using ${res.local ? 'Portable' : 'System'} Runtime`;
+            btnInstall.style.display = 'none';
+        } else {
+            statusBox.classList.remove('ready');
+            statusBox.classList.add('missing');
+            statusText.innerHTML = `<i class="fa-solid fa-circle-exclamation" style="color:#f87171"></i> Node.js is missing. Required to build apps.`;
+            btnInstall.style.display = 'block';
+        }
+    } catch (e) {
+        statusText.innerText = "Error checking Node.js";
+    }
+}
+
+document.getElementById('btnInstallNode').addEventListener('click', async () => {
+    const modal = document.getElementById('progressModal');
+    modal.classList.add('active');
+    try {
+        const res = await window.api.installNode();
+        if (res.success) {
+            log('Node.js portable environment installed successfully.', 'success');
+            checkNodeStatus();
+        } else {
+            log('Failed to install Node.js: ' + res.error, 'error');
+            alert('Failed to install: ' + res.error);
+        }
+    } catch (e) {
+        log('Error installing Node.js', 'error');
+    }
+    modal.classList.remove('active');
+});
 
 // --- PHP DOWNLOADER ---
 let phpCache = {};
