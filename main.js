@@ -1,11 +1,13 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const https = require('https');
+const { exec } = require('child_process');
 
 // --- UTILS ---
 
 function copyFolderRecursiveSync(source, target) {
-  if (!fs.existsSync(target)) fs.mkdirSync(target);
+  if (!fs.existsSync(target)) fs.mkdirSync(target, { recursive: true });
 
   if (fs.lstatSync(source).isDirectory()) {
     const files = fs.readdirSync(source);
@@ -21,31 +23,65 @@ function copyFolderRecursiveSync(source, target) {
   }
 }
 
+function downloadFile(url, dest, cb) {
+  const file = fs.createWriteStream(dest);
+  https.get(url, (response) => {
+    if (response.statusCode !== 200) {
+      cb(`Download failed. Status Code: ${response.statusCode}`);
+      return;
+    }
+    response.pipe(file);
+    file.on('finish', () => {
+      file.close(cb);
+    });
+  }).on('error', (err) => {
+    fs.unlink(dest, () => {});
+    cb(err.message);
+  });
+}
+
+function extractZip(source, target) {
+  return new Promise((resolve, reject) => {
+    let command;
+    if (process.platform === 'win32') {
+      // PowerShell unzip
+      command = `powershell -command "Expand-Archive -Path '${source}' -DestinationPath '${target}' -Force"`;
+    } else {
+      // Unix unzip
+      command = `unzip -o "${source}" -d "${target}"`;
+    }
+    
+    exec(command, (error, stdout, stderr) => {
+      if (error) {
+        reject(stderr || error.message);
+      } else {
+        resolve(stdout);
+      }
+    });
+  });
+}
+
 // --- MAIN PROCESS ---
 
 const createWindow = () => {
   const mainWindow = new BrowserWindow({
-    width: 1100,
-    height: 800,
+    width: 1200,
+    height: 900,
     minWidth: 900,
     minHeight: 600,
     backgroundColor: '#121212',
+    frame: true, // Native Window Frame (Fixes drag/resize issues)
+    autoHideMenuBar: true, // Hides File/Edit menu
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
       contextIsolation: true,
     },
-    icon: path.join(__dirname, 'public/appicon.png'),
-    titleBarStyle: 'hidden',
-    titleBarOverlay: {
-      color: '#1e1e1e',
-      symbolColor: '#ffffff',
-      height: 35
-    }
+    icon: path.join(__dirname, 'public/appicon.png')
   });
 
   mainWindow.loadFile('index.html');
-  mainWindow.setMenu(null);
+  mainWindow.setMenu(null); // Explicitly remove menu
 };
 
 app.on('ready', createWindow);
@@ -75,6 +111,47 @@ ipcMain.handle('select-file', async (event, extensions) => {
   return result.filePaths[0];
 });
 
+ipcMain.handle('download-php', async (event, version) => {
+  try {
+    // 1. Define Source URLs (Windows NTS x64 is standard for automation)
+    // Note: These links can change if archived. 
+    const versions = {
+      '8.3': 'https://windows.php.net/downloads/releases/php-8.3.4-nts-Win32-vs16-x64.zip',
+      '8.2': 'https://windows.php.net/downloads/releases/php-8.2.17-nts-Win32-vs16-x64.zip',
+      '8.1': 'https://windows.php.net/downloads/releases/archives/php-8.1.27-nts-Win32-vs16-x64.zip'
+    };
+
+    const url = versions[version];
+    if (!url) throw new Error('Version not found in catalog');
+
+    const cacheDir = path.join(app.getPath('userData'), 'php-cache');
+    if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
+
+    const zipPath = path.join(cacheDir, `php-${version}.zip`);
+    const extractPath = path.join(cacheDir, `php-${version}`);
+
+    // 2. Download
+    if (!fs.existsSync(zipPath)) {
+      await new Promise((resolve, reject) => {
+         downloadFile(url, zipPath, (err) => {
+           if (err) reject(err);
+           else resolve();
+         });
+      });
+    }
+
+    // 3. Extract
+    if (!fs.existsSync(extractPath)) {
+      await extractZip(zipPath, extractPath);
+    }
+
+    return { success: true, path: extractPath };
+
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
 ipcMain.handle('generate-app', async (event, config) => {
   try {
     const targetDir = config.sourcePath;
@@ -82,17 +159,22 @@ ipcMain.handle('generate-app', async (event, config) => {
     // 1. Handle PHP Integration
     if (config.enablePhp && config.phpPath) {
        const phpDest = path.join(targetDir, 'bin', 'php');
-       if (!fs.existsSync(path.join(targetDir, 'bin'))) fs.mkdirSync(path.join(targetDir, 'bin'));
+       if (fs.existsSync(phpDest)) {
+         // Clean previous
+         fs.rmSync(phpDest, { recursive: true, force: true });
+       }
+       fs.mkdirSync(path.join(targetDir, 'bin'), { recursive: true });
        
        // Copy PHP binaries
        copyFolderRecursiveSync(config.phpPath, phpDest);
        
        // Generate custom php.ini
-       const extensions = config.phpExtensions.split(',').map(e => e.trim()).filter(e => e);
        let extensionStr = '';
        // Basic logic to determine extension dir (Windows usually 'ext')
        extensionStr += `extension_dir = "ext"\n`;
-       extensions.forEach(ext => {
+       
+       // Config.phpExtensions is now an array
+       config.phpExtensions.forEach(ext => {
          extensionStr += `extension=php_${ext}.dll\n`;
        });
 
@@ -111,6 +193,8 @@ default_mimetype = "text/html"
 default_charset = "UTF-8"
 file_uploads = On
 allow_url_fopen = On
+cgi.force_redirect = 0
+enable_dl = Off
 ${extensionStr}
 `;
        fs.writeFileSync(path.join(phpDest, 'php.ini'), phpIni);
@@ -125,29 +209,18 @@ ${extensionStr}
     fs.writeFileSync(path.join(targetDir, 'main.js'), mainJs);
 
     // 4. Generate Build Scripts
-    // Windows
     const buildBat = `@echo off
-echo ---------------------------------------
-echo  VisualNEO Desktop Builder
-echo ---------------------------------------
-echo.
-echo 1. Installing Dependencies...
+echo Installing...
 call npm install
-echo.
-echo 2. Building Application...
+echo Building...
 call npm run build
-echo.
-echo DONE! Check the 'dist' folder.
+echo DONE!
 pause`;
     fs.writeFileSync(path.join(targetDir, 'build.bat'), buildBat);
     
-    // Linux/Mac
     const buildSh = `#!/bin/bash
-echo "Installing Dependencies..."
 npm install
-echo "Building Application..."
-npm run build
-echo "Done!"`;
+npm run build`;
     fs.writeFileSync(path.join(targetDir, 'build.sh'), buildSh);
 
     return { success: true };
@@ -180,7 +253,7 @@ function generatePackageJson(c) {
     productName: c.productName,
     files: [
       "**/*",
-      "!bin", // Don't bundle bin folder into asar, we copy it via extraResources
+      "!bin",
       "!**/*.map"
     ],
     extraResources: extraResources,
@@ -209,7 +282,7 @@ function generatePackageJson(c) {
       "build": "electron-builder"
     },
     dependencies: {
-      "portfinder": "^1.0.32" // Needed for PHP port safety
+      "portfinder": "^1.0.32"
     },
     devDependencies: {
       "electron": "^29.1.5",
@@ -255,7 +328,6 @@ let isQuitting = false;
 let phpProcess = null;
 let serverUrl = null;
 
-// --- STATE MANAGEMENT ---
 const statePath = path.join(app.getPath('userData'), 'window-state.json');
 
 function loadState() {
@@ -274,21 +346,17 @@ function saveState() {
   fs.writeFileSync(statePath, JSON.stringify(state));
 }
 
-// --- PHP SERVER LOGIC ---
 async function startPhpServer() {
   return new Promise(async (resolve, reject) => {
     if (!CONFIG.usePhp) {
-      // Static Mode
       serverUrl = null;
       resolve(null);
       return;
     }
 
     try {
-      // Find open port
       const port = await portfinder.getPortPromise({ port: CONFIG.phpPort });
       
-      // Determine PHP Path (Production vs Development)
       let phpBin = '';
       if (app.isPackaged) {
         phpBin = path.join(process.resourcesPath, 'php', 'php.exe');
@@ -300,19 +368,13 @@ async function startPhpServer() {
       const iniPath = path.join(path.dirname(phpBin), 'php.ini');
 
       console.log("Starting PHP on port " + port);
-      console.log("Root: " + webRoot);
       
-      // Spawn PHP Built-in Server
       phpProcess = spawn(phpBin, ['-S', '127.0.0.1:' + port, '-t', webRoot, '-c', iniPath], {
-        cwd: webRoot // Important for relative paths in PHP
+        cwd: webRoot
       });
 
       phpProcess.stdout.on('data', (data) => console.log(\`PHP: \${data}\`));
       phpProcess.stderr.on('data', (data) => console.error(\`PHP ERR: \${data}\`));
-
-      phpProcess.on('close', (code) => {
-        console.log(\`PHP exited with code \${code}\`);
-      });
 
       serverUrl = \`http://127.0.0.1:\${port}/\`;
       resolve(serverUrl);
@@ -331,7 +393,6 @@ function killPhp() {
   }
 }
 
-// --- MAIN WINDOW ---
 function createWindow() {
   const state = CONFIG.saveState ? loadState() : { width: ${c.width}, height: ${c.height} };
 
@@ -347,7 +408,7 @@ function createWindow() {
     kiosk: CONFIG.kiosk,
     frame: CONFIG.nativeFrame, 
     center: ${c.center},
-    autoHideMenuBar: true, // Hide default menu but keep frame
+    autoHideMenuBar: true,
     show: false,
     webPreferences: {
       nodeIntegration: false,
@@ -359,8 +420,6 @@ function createWindow() {
   ${c.iconPath ? `winConfig.icon = path.join(__dirname, '${path.basename(c.iconPath)}');` : ''}
 
   mainWindow = new BrowserWindow(winConfig);
-  
-  // Remove Menu Bar for "Native Frame" look without File/Edit menus
   mainWindow.setMenu(null);
   mainWindow.removeMenu();
 
@@ -368,16 +427,12 @@ function createWindow() {
     mainWindow.maximize();
   }
 
-  // Load Content
   if (CONFIG.usePhp && serverUrl) {
-    // Load via PHP Server
     const fullUrl = serverUrl + CONFIG.entry;
     mainWindow.loadURL(fullUrl);
   } else if (CONFIG.entry.startsWith('http')) {
-    // Remote URL
     mainWindow.loadURL(CONFIG.entry);
   } else {
-    // Static File
     mainWindow.loadFile(CONFIG.entry);
   }
 
@@ -387,12 +442,9 @@ function createWindow() {
     mainWindow.show();
   });
 
-  // --- EVENT HANDLERS ---
-
   mainWindow.on('close', (event) => {
     if (CONFIG.saveState) saveState();
     
-    // Tray Logic: If tray exists and not quitting explicitly, hide instead of close
     if (CONFIG.minToTray && tray && !isQuitting) {
       event.preventDefault();
       mainWindow.hide();
@@ -406,7 +458,6 @@ function createWindow() {
   });
   
   if (CONFIG.contextMenu) {
-      // Basic Context Menu
       mainWindow.webContents.on('context-menu', (e, params) => {
         Menu.buildFromTemplate([
            { label: 'Copy', role: 'copy' },
@@ -418,7 +469,6 @@ function createWindow() {
   }
 }
 
-// --- TRAY ---
 function createTray() {
   if (!CONFIG.tray) return;
   
@@ -426,7 +476,6 @@ function createTray() {
   
   try {
      const trayIconPath = path.join(__dirname, iconName);
-     // Check if exists, else fallback isn't easy in packed app, assume it's there
      tray = new Tray(trayIconPath);
      
      const contextMenu = Menu.buildFromTemplate([
@@ -449,8 +498,6 @@ function createTray() {
      console.log("Tray init error: " + e.message);
   }
 }
-
-// --- APP LIFECYCLE ---
 
 if (CONFIG.singleInstance) {
   const gotTheLock = app.requestSingleInstanceLock();
@@ -483,10 +530,7 @@ function initApp() {
   });
 
   app.on('window-all-closed', () => {
-    // If background running is enabled, don't quit on window close (unless Mac)
-    // But if user clicked "Quit" in tray, isQuitting is true.
     if (CONFIG.runBg && !isQuitting) {
-       // Do nothing, keep app running in tray
     } else {
        if (process.platform !== 'darwin') app.quit();
     }

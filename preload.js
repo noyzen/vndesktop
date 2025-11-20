@@ -3,7 +3,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('api', {
   selectFolder: () => ipcRenderer.invoke('select-folder'),
   selectFile: (extensions) => ipcRenderer.invoke('select-file', extensions),
-  generateApp: (config) => ipcRenderer.invoke('generate-app', config)
+  generateApp: (config) => ipcRenderer.invoke('generate-app', config),
+  downloadPhp: (version) => ipcRenderer.invoke('download-php', version)
 });
 
 contextBridge.exposeInMainWorld('versions', {

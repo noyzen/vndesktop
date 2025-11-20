@@ -17,16 +17,13 @@ const tabIcons = {
 
 tabs.forEach(tab => {
   tab.addEventListener('click', () => {
-    // Remove active class
     tabs.forEach(t => t.classList.remove('active'));
     contents.forEach(c => c.classList.remove('active'));
     
-    // Add active class
     tab.classList.add('active');
     const target = tab.getAttribute('data-tab');
     document.getElementById(`tab-${target}`).classList.add('active');
     
-    // Update header
     const icon = tabIcons[target] || '';
     headerTitle.innerHTML = `${icon} ${tab.innerText.trim()}`;
   });
@@ -58,6 +55,63 @@ function log(msg, type = 'info') {
   consoleOutput.appendChild(div);
   consoleOutput.scrollTop = consoleOutput.scrollHeight;
 }
+
+// --- PHP EXTENSION MANAGER UI ---
+const defaultExtensions = [
+  'curl', 'fileinfo', 'gd', 'intl', 'mbstring', 'openssl', 
+  'pdo_sqlite', 'sqlite3', 'mysqli', 'pdo_mysql', 'exif', 'soap'
+];
+
+const extGrid = document.getElementById('extGrid');
+const selectedExtensions = new Set(['curl', 'gd', 'mbstring', 'sqlite3', 'openssl']);
+
+function renderExtensions() {
+  extGrid.innerHTML = '';
+  defaultExtensions.forEach(ext => {
+    const el = document.createElement('div');
+    el.classList.add('ext-card');
+    if(selectedExtensions.has(ext)) el.classList.add('selected');
+    el.innerText = ext;
+    el.onclick = () => toggleExtension(ext);
+    extGrid.appendChild(el);
+  });
+}
+
+function toggleExtension(ext) {
+  if(selectedExtensions.has(ext)) {
+    selectedExtensions.delete(ext);
+  } else {
+    selectedExtensions.add(ext);
+  }
+  renderExtensions();
+}
+
+renderExtensions();
+
+// --- DOWNLOADER LOGIC ---
+document.getElementById('btnDownloadPhp').addEventListener('click', async () => {
+  const version = document.getElementById('phpVersionSelect').value;
+  log(`Starting download for PHP ${version}... Please wait.`, 'info');
+  
+  document.getElementById('btnDownloadPhp').disabled = true;
+  document.getElementById('btnDownloadPhp').innerText = "Downloading...";
+  
+  try {
+    const result = await window.api.downloadPhp(version);
+    if (result.success) {
+      document.getElementById('phpPath').value = result.path;
+      log(`PHP ${version} installed successfully at: ${result.path}`, 'success');
+    } else {
+      log(`Download Error: ${result.error}`, 'error');
+    }
+  } catch (e) {
+    log(`Error: ${e.message}`, 'error');
+  } finally {
+    document.getElementById('btnDownloadPhp').disabled = false;
+    document.getElementById('btnDownloadPhp').innerHTML = '<i class="fa-solid fa-cloud-arrow-down"></i> Download & Install';
+  }
+});
+
 
 // File Pickers
 document.getElementById('btnSelectSource').addEventListener('click', async () => {
@@ -98,10 +152,14 @@ document.getElementById('btnGenerate').addEventListener('click', async () => {
   const phpPath = document.getElementById('phpPath').value;
   
   if (enablePhp && !phpPath) {
-    log('Error: PHP is enabled but no PHP Binary folder selected.', 'error');
-    alert('Please select a PHP Binary Folder or disable PHP.');
+    log('Error: PHP is enabled but no PHP folder selected/downloaded.', 'error');
+    alert('Please select or download a PHP version.');
     return;
   }
+
+  // Merge Extensions
+  const extraExt = document.getElementById('extraExtensions').value.split(',').map(s => s.trim()).filter(s => s);
+  const finalExtensions = [...selectedExtensions, ...extraExt];
 
   const config = {
     // Project
@@ -121,7 +179,7 @@ document.getElementById('btnGenerate').addEventListener('click', async () => {
     fullscreenable: document.getElementById('fullscreenable').checked,
     kiosk: document.getElementById('kiosk').checked,
     saveState: document.getElementById('saveState').checked,
-    nativeFrame: document.getElementById('nativeFrame').checked,
+    nativeFrame: true, // Enforced in this version
     center: document.getElementById('center').checked,
 
     // PHP
@@ -131,7 +189,7 @@ document.getElementById('btnGenerate').addEventListener('click', async () => {
     phpMemory: document.getElementById('phpMemory').value,
     phpUpload: document.getElementById('phpUpload').value,
     phpTime: document.getElementById('phpTime').value,
-    phpExtensions: document.getElementById('phpExtensions').value,
+    phpExtensions: finalExtensions,
 
     // System
     trayIcon: document.getElementById('trayIcon').checked,
@@ -157,14 +215,12 @@ document.getElementById('btnGenerate').addEventListener('click', async () => {
     if (result.success) {
       log('SUCCESS! Application generated.', 'success');
       log(`Target: ${config.sourcePath}`, 'info');
-      if (enablePhp) log('PHP binaries copied to project.', 'info');
       
       log('-----------------------------------');
       log('NEXT STEPS:', 'warn');
       log('1. Open terminal in your source folder.');
       log('2. Run "npm install"');
-      log('3. Run "npm start" to test.');
-      log('4. Run "npm run build" to create .exe');
+      log('3. Run "npm run build"');
       log('-----------------------------------');
     } else {
       log(`Generation Failed: ${result.error}`, 'error');
