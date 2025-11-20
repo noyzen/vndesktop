@@ -17,21 +17,20 @@ async function deleteFolderRobust(targetPath, isBackground = false) {
     // Helper to check existence
     const exists = () => fs.existsSync(targetPath);
 
-    const maxRetries = 10; 
+    // Extended retries to handle Antivirus scanning locks
+    const maxRetries = 15; 
     for (let i = 0; i < maxRetries; i++) {
         try {
-            // 1. Node.js Native Delete
-            try {
-                fs.rmSync(targetPath, { recursive: true, force: true });
-                if (!exists()) return;
-            } catch(e) {}
-
-            // 2. Windows Shell Force Delete (often bypasses minor locks)
+            // 1. Windows Shell Force Delete (Most effective for locked files)
             if (process.platform === 'win32') {
                 try {
                     execSync(`rmdir /s /q "${targetPath}"`, { stdio: 'ignore' });
-                    if (!exists()) return;
-                } catch(e) {}
+                } catch(e) {
+                    // Fallback to Node native
+                    fs.rmSync(targetPath, { recursive: true, force: true });
+                }
+            } else {
+                fs.rmSync(targetPath, { recursive: true, force: true });
             }
             
             if (!exists()) return;
@@ -39,8 +38,8 @@ async function deleteFolderRobust(targetPath, isBackground = false) {
             // If it's the last retry, throw
             if (i === maxRetries - 1) throw new Error("Resource locked or permission denied.");
 
-            // Backoff: 100ms, 200ms...
-            const delay = 100 * Math.pow(1.5, i);
+            // Exponential Backoff: 200ms, 300ms, 450ms...
+            const delay = 200 * Math.pow(1.4, i);
             await new Promise(resolve => setTimeout(resolve, delay));
 
         } catch (e) {
@@ -54,33 +53,48 @@ async function deleteFolderRobust(targetPath, isBackground = false) {
 
 // Clever "Move to Trash" strategy
 // 1. Try System Temp (Cleanest, hides it from user)
-// 2. Try Hidden Local Trash (Keeps dist clean)
+// 2. Try Hidden Local Trash OUTSIDE dist (Keeps dist clean)
 function forceMoveToTrash(targetPath) {
     const name = `trash_${path.basename(targetPath)}_${Date.now()}`;
     
-    // Strategy A: System Temp
+    // Strategy A: System Temp (Using Shell Move for power)
     try {
         const tempDest = path.join(app.getPath('temp'), name);
-        fs.renameSync(targetPath, tempDest);
+        
+        if (process.platform === 'win32') {
+            execSync(`move "${targetPath}" "${tempDest}"`, { stdio: 'ignore' });
+        } else {
+            fs.renameSync(targetPath, tempDest);
+        }
         return tempDest; 
     } catch (e) { /* EXDEV or perms */ }
 
-    // Strategy B: Hidden local trash (outside dist)
+    // Strategy B: Hidden local trash (Strictly OUTSIDE dist)
     try {
-        // Assuming targetPath is .../vnbuild/dist/folder
-        // We want .../vnbuild/.trash/folder
-        const distDir = path.dirname(targetPath); 
-        const buildDir = path.dirname(distDir);   
-        const trashDir = path.join(buildDir, '.trash');
+        // If targetPath is .../vnbuild/dist/win-unpacked
+        // We want .../vnbuild/.trash
         
-        if (!fs.existsSync(trashDir)) fs.mkdirSync(trashDir);
+        const parentDir = path.dirname(targetPath); // .../dist
+        const buildDir = path.dirname(parentDir);   // .../vnbuild
         
-        const localDest = path.join(trashDir, name);
-        fs.renameSync(targetPath, localDest);
-        return localDest;
+        // Safety: Only do this if we are in a 'dist' structure we recognize
+        if (path.basename(parentDir) === 'dist') {
+            const trashDir = path.join(buildDir, '.trash');
+            if (!fs.existsSync(trashDir)) fs.mkdirSync(trashDir, { recursive: true });
+            
+            const localDest = path.join(trashDir, name);
+            
+            if (process.platform === 'win32') {
+                execSync(`move "${targetPath}" "${localDest}"`, { stdio: 'ignore' });
+            } else {
+                fs.renameSync(targetPath, localDest);
+            }
+            return localDest;
+        }
     } catch (e) {
         return null;
     }
+    return null;
 }
 
 async function prepareDistFolder(buildDir, sendLog) {
@@ -99,7 +113,7 @@ async function prepareDistFolder(buildDir, sendLog) {
         
         if (trashPath) {
             sendLog(`Moved locked folder to trash area. Build path is clear.`);
-            // Fire and forget delete of the trash
+            // Fire and forget delete of the trash in background
             deleteFolderRobust(trashPath, true).catch(() => {});
             return true;
         } else {
@@ -730,6 +744,7 @@ ipcMain.handle('build-app', async (event, sourceRoot) => {
                     }
 
                     // --- CLEANUP ---
+                    // Increased timeout to 4s to allow Windows Defender to release locks on new .exe/.asar files
                     setTimeout(async () => {
                         try {
                             sendLog('Performing final cleanup...');
@@ -746,19 +761,22 @@ ipcMain.handle('build-app', async (event, sourceRoot) => {
                                     const fullPath = path.join(distPath, f);
                                     // Remove builder metadata files
                                     if (junkExtensions.some(ext => f.endsWith(ext))) {
-                                        try { deleteFolderRobust(fullPath, true); } catch(e) {}
+                                        try { await deleteFolderRobust(fullPath, true); } catch(e) {}
                                     }
                                     
                                     // Remove unpacked folder if user didn't request it
                                     if (f === 'win-unpacked' && !config.targetUnpacked) {
                                         try {
+                                            // Attempt robust deletion
                                             await deleteFolderRobust(fullPath);
-                                        } catch (delErr) {
-                                            // If failed, displace it to trash
-                                            const trashPath = forceMoveToTrash(fullPath);
-                                            if (trashPath) {
-                                                deleteFolderRobust(trashPath, true).catch(()=>{});
+                                            
+                                            // Double check: If it still exists (locked?), force move it OUT of dist
+                                            if (fs.existsSync(fullPath)) {
+                                                forceMoveToTrash(fullPath);
                                             }
+                                        } catch (delErr) {
+                                            // Fallback
+                                            forceMoveToTrash(fullPath);
                                         }
                                     }
                                 }
@@ -770,7 +788,7 @@ ipcMain.handle('build-app', async (event, sourceRoot) => {
                             sendLog('Cleanup warning (minor): ' + e.message, false);
                             resolve({ success: true });
                         }
-                    }, 3000); // Wait 3s for file handles to release
+                    }, 4000); 
                 });
             });
         });
