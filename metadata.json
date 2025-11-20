@@ -1,0 +1,5 @@
+{
+  "name": "VisualNEO Desktop",
+  "description": "A minimal 'Hello World' Electron desktop application. It includes scripts to run in development mode (`npm run dev`) and to build for Windows in three formats: a setup installer, a single portable executable, and an unpacked folder (`npm run build`).",
+  "requestFramePermissions": []
+}
