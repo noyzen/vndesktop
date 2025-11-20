@@ -10,21 +10,33 @@ const portfinder = require('portfinder');
 
 // --- UTILS ---
 
+async function killLocks(targetDir, sendLog) {
+    if (process.platform !== 'win32') return;
+    try {
+        // Sanitize path for WQL
+        const cleanPath = path.resolve(targetDir).replace(/\\/g, '\\\\');
+        // Kill processes where ExecutablePath starts with targetDir
+        const cmd = `wmic process where "ExecutablePath like '${cleanPath}%'" call terminate`;
+        execSync(cmd, { stdio: 'ignore' });
+        if (sendLog) sendLog("Terminated locked processes.");
+    } catch (e) {
+        // Ignore errors if no processes found
+    }
+}
+
 // Robust Delete Helper
 async function deleteFolderRobust(targetPath, isBackground = false) {
     if (!fs.existsSync(targetPath)) return;
     
     const exists = () => fs.existsSync(targetPath);
-    const maxRetries = 8; 
+    const maxRetries = 5; 
     
     for (let i = 0; i < maxRetries; i++) {
         try {
             if (process.platform === 'win32') {
                 try {
-                    // Try fast deletion first
                     fs.rmSync(targetPath, { recursive: true, force: true });
                 } catch (err) {
-                    // Fallback to system command which can sometimes override locks
                     execSync(`rmdir /s /q "${targetPath}"`, { stdio: 'ignore' });
                 }
             } else {
@@ -33,15 +45,12 @@ async function deleteFolderRobust(targetPath, isBackground = false) {
             
             if (!exists()) return;
             
-            // Exponential backoff
-            const delay = 200 * Math.pow(1.5, i);
-            await new Promise(resolve => setTimeout(resolve, delay));
+            // Backoff
+            await new Promise(resolve => setTimeout(resolve, 200 * (i + 1)));
 
         } catch (e) {
             if (i === maxRetries - 1) {
-                // On failure, try to move it out of the way
-                if (!isBackground) console.error(`Failed to delete ${targetPath}, attempting move...`);
-                forceMoveToTrash(targetPath);
+                if (!isBackground) console.warn(`Failed to delete ${targetPath}`);
             }
         }
     }
@@ -50,33 +59,31 @@ async function deleteFolderRobust(targetPath, isBackground = false) {
 // Move to Trash strategy (Rename to temp)
 function forceMoveToTrash(targetPath) {
     if (!fs.existsSync(targetPath)) return null;
-    // Unique name to avoid collisions
-    const name = `trash_${path.basename(targetPath)}_${Date.now()}_${Math.floor(Math.random()*1000)}`;
+    const name = `.trash_${Date.now()}_${Math.floor(Math.random()*1000)}`;
     
-    // Strategy 1: Rename in same parent dir (Atomic, Fast, bypasses cross-drive issues)
     try {
         const parentDir = path.dirname(targetPath);
-        const localDest = path.join(parentDir, `.${name}`); // Dot prefix to hide/ignore
+        const localDest = path.join(parentDir, name);
         fs.renameSync(targetPath, localDest);
         return localDest; 
     } catch (e) {
-        // Strategy 2: Move to System Temp (might fail if cross-drive)
-        try {
-            const tempDest = path.join(app.getPath('temp'), name);
-            fs.renameSync(targetPath, tempDest);
-            return tempDest;
-        } catch (e2) { return null; }
+        return null;
     }
 }
 
 async function prepareDistFolder(buildDir, sendLog) {
     const distPath = path.join(buildDir, 'dist');
-    // Also clean any legacy trash in the build dir
+    
+    // 1. Clean up old trash folders silently
     try {
         const files = fs.readdirSync(buildDir);
         for (const f of files) {
-            if (f.startsWith('.trash_') || f.startsWith('trash_')) {
-                try { fs.rmSync(path.join(buildDir, f), { recursive: true, force: true }); } catch(e) {}
+            if (f.startsWith('.trash') || f.startsWith('trash')) {
+                try { 
+                    const trashPath = path.join(buildDir, f);
+                    // Try to delete, if locked just skip
+                    fs.rmSync(trashPath, { recursive: true, force: true }); 
+                } catch(e) {}
             }
         }
     } catch(e) {}
@@ -85,23 +92,21 @@ async function prepareDistFolder(buildDir, sendLog) {
 
     sendLog("Cleaning output directory...");
     
-    try {
-        await deleteFolderRobust(distPath);
-        
-        if (fs.existsSync(distPath)) {
-             const trashPath = forceMoveToTrash(distPath);
-             
-             if (fs.existsSync(distPath)) {
-                 sendLog("Error: Output directory is locked by another process (Antivirus/Explorer).", true);
-                 return false;
-             }
-             sendLog(`Output directory locked. Moved to ${trashPath} to proceed.`);
-        }
+    // 2. Try to delete normally
+    await deleteFolderRobust(distPath);
+    
+    if (!fs.existsSync(distPath)) return true;
+
+    // 3. If still exists, try to rename (move aside)
+    const trashPath = forceMoveToTrash(distPath);
+    if (trashPath) {
+        sendLog(`Output directory was locked. Renamed to ${path.basename(trashPath)} to proceed.`);
         return true;
-    } catch (e) {
-        sendLog(`Critical: Could not clean output directory: ${e.message}`, true);
-        return false;
     }
+
+    // 4. If rename failed, it's a hard lock
+    sendLog("Error: Output directory is locked by another process (Antivirus/Explorer).", true);
+    return false;
 }
 
 function copyFolderRecursiveSync(source, target, exclusions = []) {
@@ -111,7 +116,7 @@ function copyFolderRecursiveSync(source, target, exclusions = []) {
     const files = fs.readdirSync(source);
     files.forEach((file) => {
       if (exclusions.includes(file)) return;
-      if (file.startsWith('.trash_')) return;
+      if (file.startsWith('.trash') || file.startsWith('trash')) return;
       
       const curSource = path.join(source, file);
       const curTarget = path.join(target, file);
@@ -563,19 +568,22 @@ ipcMain.handle('build-app', async (event, sourceRoot) => {
         if (!fs.existsSync(buildDir)) return resolve({ success: false, error: 'vnbuild not found. Generate config first.' });
 
         try {
+            // 1. Kill previous instances aggressively
+            sendLog('Checking for running instances...');
             const configFile = path.join(buildDir, 'visualneo.json');
             if (fs.existsSync(configFile)) {
                 const conf = JSON.parse(fs.readFileSync(configFile, 'utf8'));
-                const execName = conf.productName + ".exe";
-                sendLog(`Checking for running instances of ${execName}...`);
                 try { 
-                    // Use windowsHide to prevent command prompt flash
-                    execSync(`taskkill /F /IM "${execName}"`, { stdio: 'ignore', windowsHide: true }); 
-                    sendLog('Closed running application instance.'); 
+                    execSync(`taskkill /F /IM "${conf.productName}.exe"`, { stdio: 'ignore', windowsHide: true }); 
                 } catch(e) {}
             }
+            // Kill any processes running from this folder
+            await killLocks(buildDir, sendLog);
+            sendLog('Processes terminated.');
+
         } catch(e) { sendLog('Warning: Instance check skipped.', true); }
 
+        // 2. Prepare dist folder with rename fallback
         const distCleaned = await prepareDistFolder(buildDir, sendLog);
         if (!distCleaned) return resolve({ success: false, error: 'Output folder is locked by System/Antivirus. Please close open files.' });
         
@@ -597,35 +605,30 @@ ipcMain.handle('build-app', async (event, sourceRoot) => {
             install.on('close', (code) => {
                 if (code !== 0) { sendLog(`npm install failed: code ${code}`, true); return resolve({ success: false, error: 'Install failed' }); }
                 
-                // WAIT: Give Windows Defender time to release handles on node_modules
-                sendLog('Waiting for file locks to settle...');
-                setTimeout(() => {
-                    sendLog('Building application artifacts...');
-                    const build = spawn(npmCmd, ['run', 'build'], { cwd: buildDir, shell: true, env: buildEnv });
-                    build.stdout.on('data', (d) => sendLog(d.toString()));
-                    build.stderr.on('data', (d) => sendLog(d.toString()));
+                sendLog('Building application artifacts...');
+                const build = spawn(npmCmd, ['run', 'build'], { cwd: buildDir, shell: true, env: buildEnv });
+                build.stdout.on('data', (d) => sendLog(d.toString()));
+                build.stderr.on('data', (d) => sendLog(d.toString()));
 
-                    build.on('close', (bCode) => {
-                        if (bCode !== 0) { sendLog(`Build failed: code ${bCode}`, true); return resolve({ success: false, error: 'Build failed' }); }
-                        setTimeout(async () => {
-                            try {
-                                sendLog('Performing final cleanup...');
-                                const distPath = path.join(buildDir, 'dist');
-                                if (fs.existsSync(distPath)) {
-                                    const files = fs.readdirSync(distPath);
-                                    // Remove temp builder files to keep folder clean
-                                    for (const f of files) {
-                                        const fullPath = path.join(distPath, f);
-                                        if (['.yml', '.yaml', '.blockmap', 'builder-debug.yml'].some(ext => f.endsWith(ext))) { 
-                                            try { await deleteFolderRobust(fullPath, true); } catch(e) {} 
-                                        }
+                build.on('close', (bCode) => {
+                    if (bCode !== 0) { sendLog(`Build failed: code ${bCode}`, true); return resolve({ success: false, error: 'Build failed' }); }
+                    setTimeout(async () => {
+                        try {
+                            const distPath = path.join(buildDir, 'dist');
+                            // Cleanup builder temp files
+                            if (fs.existsSync(distPath)) {
+                                const files = fs.readdirSync(distPath);
+                                for (const f of files) {
+                                    const fullPath = path.join(distPath, f);
+                                    if (['.yml', '.yaml', '.blockmap', 'builder-debug.yml'].some(ext => f.endsWith(ext))) { 
+                                        try { fs.rmSync(fullPath, {recursive:true}); } catch(e) {} 
                                     }
                                 }
-                                sendLog('Build Success!'); resolve({ success: true });
-                            } catch(e) { sendLog('Cleanup warning: ' + e.message, false); resolve({ success: true }); }
-                        }, 2000); 
-                    });
-                }, 3000); // Increased delay
+                            }
+                            sendLog('Build Success!'); resolve({ success: true });
+                        } catch(e) { sendLog('Cleanup warning: ' + e.message, false); resolve({ success: true }); }
+                    }, 1500); 
+                });
             });
         });
     });
@@ -757,8 +760,8 @@ async function startPhpServer() {
       
       const checkOutput = (data) => {
           const str = data.toString();
-          // Match http://127.0.0.1:1234 or http://localhost:1234
-          const match = str.match(/http:\\/\\/(?:127\\.0\\.0\\.1|localhost):(\\d+)/i);
+          // Regex for IP:PORT extraction - Using new RegExp to avoid escaping issues
+          const match = str.match(new RegExp("http://(?:127\\\\.0\\\\.0\\\\.1|localhost):(\\\\d+)", "i"));
           if (match && !portFound) { 
               portFound = true; 
               clearTimeout(timer); 
