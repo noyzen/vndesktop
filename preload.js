@@ -19,6 +19,10 @@ contextBridge.exposeInMainWorld('api', {
   loadProjectConfig: (path) => ipcRenderer.invoke('load-project-config', path),
   saveProjectConfig: (path, config) => ipcRenderer.invoke('save-project-config', { folderPath: path, config }),
 
+  // PHP Manager
+  getPhpExtensions: (phpPath) => ipcRenderer.invoke('get-php-extensions', phpPath),
+  addPhpExtension: (phpPath, filePath) => ipcRenderer.invoke('add-php-extension', { phpPath, filePath }),
+
   // Node.js Manager
   checkNode: () => ipcRenderer.invoke('check-node-install'),
   installNode: () => ipcRenderer.invoke('install-node')

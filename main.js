@@ -474,13 +474,52 @@ ipcMain.handle('get-php-cache', async () => {
     const results = {};
     if (!fs.existsSync(cacheDir)) return results;
     
-    ['8.3', '8.2', '8.1'].forEach(ver => {
+    ['8.3', '8.2', '8.1', '7.4'].forEach(ver => {
         const possiblePath = path.join(cacheDir, `php-${ver}`);
         if (fs.existsSync(possiblePath) && findPhpBinaryDir(possiblePath)) {
             results[ver] = findPhpBinaryDir(possiblePath);
         }
     });
     return results;
+});
+
+ipcMain.handle('get-php-extensions', async (event, phpPath) => {
+    if (!phpPath || !fs.existsSync(phpPath)) return [];
+    
+    const extDir = path.join(phpPath, 'ext');
+    if (!fs.existsSync(extDir)) return [];
+    
+    try {
+        const files = fs.readdirSync(extDir);
+        // Filter for .dll files starting with php_ (common convention) but robust enough for others
+        return files
+            .filter(f => f.endsWith('.dll'))
+            .map(f => {
+                // Return clean name (remove php_ prefix and .dll extension for display)
+                const name = f;
+                const simpleName = f.replace(/^php_/, '').replace(/\.dll$/, '');
+                return { file: name, name: simpleName };
+            });
+    } catch (e) {
+        return [];
+    }
+});
+
+ipcMain.handle('add-php-extension', async (event, { phpPath, filePath }) => {
+    if (!phpPath || !fs.existsSync(phpPath)) return { success: false, error: "Invalid PHP Path" };
+    if (!filePath || !fs.existsSync(filePath)) return { success: false, error: "Invalid File" };
+    
+    const extDir = path.join(phpPath, 'ext');
+    if (!fs.existsSync(extDir)) return { success: false, error: "PHP 'ext' directory not found" };
+    
+    try {
+        const fileName = path.basename(filePath);
+        const dest = path.join(extDir, fileName);
+        fs.copyFileSync(filePath, dest);
+        return { success: true };
+    } catch (e) {
+        return { success: false, error: e.message };
+    }
 });
 
 ipcMain.handle('download-php', async (event, version) => {
@@ -490,7 +529,8 @@ ipcMain.handle('download-php', async (event, version) => {
   const filenames = {
       '8.3': 'php-8.3.12-nts-Win32-vs16-x64.zip',
       '8.2': 'php-8.2.24-nts-Win32-vs16-x64.zip',
-      '8.1': 'php-8.1.29-nts-Win32-vs16-x64.zip'
+      '8.1': 'php-8.1.29-nts-Win32-vs16-x64.zip',
+      '7.4': 'php-7.4.33-nts-Win32-vc15-x64.zip'
   };
   
   const filename = filenames[version];
@@ -500,21 +540,34 @@ ipcMain.handle('download-php', async (event, version) => {
   const extractPath = path.join(cacheDir, `php-${version}`);
 
   try {
+    // Primary Release URL
     const primaryUrl = `https://windows.php.net/downloads/releases/${filename}`;
+    // Archives URL (Older versions move here)
     const archiveUrl = `https://windows.php.net/downloads/releases/archives/${filename}`;
+    
+    // Priority URL: If 7.4, usually only in archives now.
+    const urls = version === '7.4' ? [archiveUrl, primaryUrl] : [primaryUrl, archiveUrl];
 
     if (!fs.existsSync(zipPath) || fs.statSync(zipPath).size < 5000000) {
-       try {
-          mainWindow.webContents.send('download-progress', { percent: 0, status: 'Connecting...' });
-          await downloadFile(primaryUrl, zipPath, (percent, current, total) => {
-            mainWindow.webContents.send('download-progress', { percent, current, total, status: 'Downloading...' });
-          });
-       } catch (e) {
-          mainWindow.webContents.send('download-progress', { percent: 0, status: 'Trying archive...' });
-          await downloadFile(archiveUrl, zipPath, (percent, current, total) => {
-            mainWindow.webContents.send('download-progress', { percent, current, total, status: 'Downloading archive...' });
-          });
-       }
+        let downloaded = false;
+        let lastError = null;
+
+        for (const url of urls) {
+             try {
+                mainWindow.webContents.send('download-progress', { percent: 0, status: `Connecting to ${url.includes('archives') ? 'Archive' : 'Mirror'}...` });
+                await downloadFile(url, zipPath, (percent, current, total) => {
+                    mainWindow.webContents.send('download-progress', { percent, current, total, status: `Downloading PHP ${version}...` });
+                });
+                downloaded = true;
+                break; // Success
+             } catch (e) {
+                lastError = e;
+                console.log("Mirror failed", e.message);
+                // Continue to next URL
+             }
+        }
+        
+        if (!downloaded) throw lastError || new Error("All download mirrors failed.");
     }
 
     mainWindow.webContents.send('download-progress', { percent: 100, status: 'Extracting...' });
@@ -627,9 +680,34 @@ ipcMain.handle('generate-app', async (event, config) => {
            throw new Error("Failed to copy php.exe. Check source folder.");
        }
        
+       // --- PHP.INI GENERATION ---
        let extensionStr = `extension_dir = "ext"\n`;
+       
+       // Iterate config extensions and add them. 
+       // Note: In Windows PHP, some extensions are 'php_name.dll', some 'name'. 
+       // The renderer sends the filename (e.g. 'php_curl.dll')
        if (config.phpExtensions) {
-           config.phpExtensions.forEach(ext => extensionStr += `extension=php_${ext}.dll\n`);
+           config.phpExtensions.forEach(ext => {
+               // Ensure we don't double 'dll' or 'php_' if user manually typed it badly, 
+               // though the renderer sends exact filenames now.
+               if (ext.trim()) {
+                   extensionStr += `extension=${ext}\n`;
+               }
+           });
+       }
+       
+       // Basic OpCache Config
+       let opcacheStr = "";
+       if (config.phpOpcache) {
+           opcacheStr = `
+[opcache]
+zend_extension=php_opcache.dll
+opcache.enable=1
+opcache.enable_cli=1
+opcache.memory_consumption=128
+opcache.interned_strings_buffer=8
+opcache.max_accelerated_files=4000
+`;
        }
 
        const phpIni = `
@@ -640,7 +718,9 @@ max_execution_time = ${config.phpTime || 120}
 memory_limit = ${config.phpMemory || "256M"}
 post_max_size = ${config.phpUpload || "64M"}
 upload_max_filesize = ${config.phpUpload || "64M"}
-display_errors = Off
+max_input_vars = 3000
+display_errors = ${config.phpDisplayErrors ? "On" : "Off"}
+display_startup_errors = ${config.phpDisplayErrors ? "On" : "Off"}
 log_errors = On
 error_log = php_errors.log
 default_mimetype = "text/html"
@@ -648,8 +728,14 @@ default_charset = "UTF-8"
 file_uploads = On
 allow_url_fopen = On
 cgi.force_redirect = 0
-enable_dl = Off
+enable_dl = On
+date.timezone = "${config.phpTimezone || 'UTC'}"
+
+; --- EXTENSIONS ---
 ${extensionStr}
+
+; --- OPCACHE ---
+${opcacheStr}
 `;
        fs.writeFileSync(path.join(phpDest, 'php.ini'), phpIni);
     }

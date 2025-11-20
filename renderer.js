@@ -17,6 +17,8 @@ const headerTitle = document.getElementById('header-title');
 // PHP Controls
 const phpToggle = document.getElementById('enablePhp');
 const phpPanel = document.getElementById('phpPanel');
+const extGrid = document.getElementById('extGrid');
+const extSearch = document.getElementById('extSearch');
 
 // Data Mode Cards
 const cardStatic = document.getElementById('card-static');
@@ -24,7 +26,8 @@ const cardWritable = document.getElementById('card-writable');
 
 // State
 let currentProjectPath = null;
-let selectedExtensions = new Set(['curl', 'gd', 'mbstring', 'sqlite3', 'openssl', 'pdo_sqlite']);
+let selectedExtensions = new Set(['php_curl.dll', 'php_gd.dll', 'php_mbstring.dll', 'php_sqlite3.dll', 'php_openssl.dll', 'php_pdo_sqlite.dll']);
+let availableExtensions = []; // Loaded from backend
 let phpCache = {};
 
 // --- UI HELPERS ---
@@ -168,16 +171,22 @@ tabs.forEach(tab => {
         
         // Check Node when build tab opens
         if(target === 'build') checkNode();
+        // Check Extensions when PHP tab opens
+        if(target === 'php' && document.getElementById('enablePhp').checked) loadExtensions(); 
     });
 });
 
 // PHP Logic
 phpToggle.addEventListener('change', () => {
-    phpPanel.style.display = phpToggle.checked ? 'block' : 'none';
-    if(phpToggle.checked && !document.getElementById('phpPath').value) {
-        // Try auto-fill from cache
-        const ver = document.getElementById('phpVersionSelect').value;
-        if(phpCache[ver]) document.getElementById('phpPath').value = phpCache[ver];
+    const isEnabled = phpToggle.checked;
+    phpPanel.style.display = isEnabled ? 'block' : 'none';
+    if(isEnabled) {
+        if(!document.getElementById('phpPath').value) {
+            // Try auto-fill from cache
+            const ver = document.getElementById('phpVersionSelect').value;
+            if(phpCache[ver]) document.getElementById('phpPath').value = phpCache[ver];
+        }
+        loadExtensions();
     }
 });
 
@@ -191,34 +200,84 @@ function updateDataModeUI() {
 cardStatic.onclick = () => { cardStatic.querySelector('input').checked = true; updateDataModeUI(); };
 cardWritable.onclick = () => { cardWritable.querySelector('input').checked = true; updateDataModeUI(); };
 
-// PHP Extensions
-function renderExtensions() {
-    const grid = document.getElementById('extGrid');
-    grid.innerHTML = '';
-    const common = ['curl', 'fileinfo', 'gd', 'intl', 'mbstring', 'openssl', 'pdo_sqlite', 'sqlite3', 'mysqli', 'pdo_mysql', 'soap'];
+// --- EXTENSION MANAGER ---
+
+async function loadExtensions() {
+    const phpPath = document.getElementById('phpPath').value;
+    const loader = document.getElementById('extLoader');
+    const error = document.getElementById('extError');
     
-    common.forEach(ext => {
+    extGrid.innerHTML = '';
+    error.style.display = 'none';
+
+    if(!phpPath) {
+        error.style.display = 'block';
+        return;
+    }
+
+    loader.style.display = 'block';
+    availableExtensions = await window.api.getPhpExtensions(phpPath);
+    loader.style.display = 'none';
+    
+    if(!availableExtensions || availableExtensions.length === 0) {
+        error.style.display = 'block';
+    } else {
+        renderExtensions();
+    }
+}
+
+function renderExtensions() {
+    extGrid.innerHTML = '';
+    const filter = extSearch.value.toLowerCase();
+    
+    availableExtensions.forEach(ext => {
+        if(filter && !ext.name.toLowerCase().includes(filter)) return;
+
         const label = document.createElement('label');
         label.className = 'checkbox-card';
         
         const chk = document.createElement('input');
         chk.type = 'checkbox';
-        chk.checked = selectedExtensions.has(ext);
-        chk.onchange = () => { if(chk.checked) selectedExtensions.add(ext); else selectedExtensions.delete(ext); };
+        chk.checked = selectedExtensions.has(ext.file);
+        chk.onchange = () => { 
+            if(chk.checked) selectedExtensions.add(ext.file); 
+            else selectedExtensions.delete(ext.file); 
+        };
         
-        // Custom styled checkbox elements
         const customCheck = document.createElement('span');
         customCheck.className = 'custom-check';
         
         const span = document.createElement('span');
-        span.innerText = ext;
+        span.innerText = ext.name; // Display friendly name
+        span.title = ext.file; // Tooltip full filename
         
         label.appendChild(chk);
         label.appendChild(customCheck);
         label.appendChild(span);
-        grid.appendChild(label);
+        extGrid.appendChild(label);
     });
 }
+
+// Live Search
+extSearch.addEventListener('input', renderExtensions);
+
+// Install Extension
+document.getElementById('btnAddExt').onclick = async () => {
+    const phpPath = document.getElementById('phpPath').value;
+    if(!phpPath) { alert("Please select a PHP folder first."); return; }
+    
+    const file = await window.api.selectFile(['dll']);
+    if(file) {
+        const res = await window.api.addPhpExtension(phpPath, file);
+        if(res.success) {
+            await loadExtensions();
+            alert("Extension installed successfully!");
+        } else {
+            alert("Failed to install extension: " + res.error);
+        }
+    }
+};
+
 
 // --- FORM HANDLING ---
 
@@ -235,8 +294,13 @@ function resetForm() {
     document.getElementById('targetNsis').checked = true;
     document.getElementById('targetPortable').checked = true;
     document.getElementById('targetUnpacked').checked = false;
+    
+    // New Configs Defaults
+    document.getElementById('phpTimezone').value = 'UTC';
+    document.getElementById('phpOpcache').checked = true;
+    document.getElementById('phpDisplayErrors').checked = false;
+    
     cardStatic.click();
-    renderExtensions();
     phpToggle.dispatchEvent(new Event('change'));
 }
 
@@ -260,15 +324,20 @@ function populateForm(c) {
     document.getElementById('enablePhp').checked = c.enablePhp;
     document.getElementById('phpPath').value = c.phpPath || '';
     document.getElementById('phpMemory').value = c.phpMemory || '256M';
+    document.getElementById('phpUpload').value = c.phpUpload || '64M';
+    document.getElementById('phpTime').value = c.phpTime || '120';
+    
+    document.getElementById('phpTimezone').value = c.phpTimezone || 'UTC';
+    document.getElementById('phpOpcache').checked = c.phpOpcache !== false; // Default true
+    document.getElementById('phpDisplayErrors').checked = c.phpDisplayErrors || false;
     
     if(c.phpExtensions) selectedExtensions = new Set(c.phpExtensions);
-    renderExtensions();
     
     // Tray / System
     document.getElementById('trayIcon').checked = c.trayIcon;
     document.getElementById('minimizeToTray').checked = c.minimizeToTray;
     document.getElementById('closeToTray').checked = c.closeToTray || false;
-    document.getElementById('showTaskbar').checked = c.showTaskbar !== false; // default true
+    document.getElementById('showTaskbar').checked = c.showTaskbar !== false; 
     
     document.getElementById('singleInstance').checked = c.singleInstance;
     document.getElementById('runBackground').checked = c.runBackground;
@@ -291,8 +360,6 @@ function getAppConfig() {
     const usePhp = document.getElementById('enablePhp').checked;
     if(usePhp && !phpPath) { alert('PHP Path is required'); return null; }
 
-    const extraExt = document.getElementById('extraExtensions').value.split(',').map(s => s.trim()).filter(s => s);
-
     return {
         sourcePath: document.getElementById('sourcePath').value,
         productName: document.getElementById('productName').value,
@@ -314,7 +381,10 @@ function getAppConfig() {
         phpMemory: document.getElementById('phpMemory').value,
         phpUpload: document.getElementById('phpUpload').value,
         phpTime: document.getElementById('phpTime').value,
-        phpExtensions: [...selectedExtensions, ...extraExt],
+        phpTimezone: document.getElementById('phpTimezone').value,
+        phpOpcache: document.getElementById('phpOpcache').checked,
+        phpDisplayErrors: document.getElementById('phpDisplayErrors').checked,
+        phpExtensions: [...selectedExtensions],
         
         trayIcon: document.getElementById('trayIcon').checked,
         minimizeToTray: document.getElementById('minimizeToTray').checked,
@@ -402,7 +472,10 @@ document.getElementById('btnInstallNode').onclick = async () => {
 // File Picking
 document.getElementById('btnSelectPhp').onclick = async () => {
     const p = await window.api.selectFolder();
-    if(p) document.getElementById('phpPath').value = p;
+    if(p) {
+        document.getElementById('phpPath').value = p;
+        loadExtensions();
+    }
 };
 document.getElementById('btnSelectIcon').onclick = async () => {
     const p = await window.api.selectFile(['ico','png','icns']);
@@ -423,6 +496,8 @@ document.getElementById('btnDownloadPhp').onclick = async () => {
     if(res.success) {
         phpCache = await window.api.getPhpCache();
         document.getElementById('phpPath').value = res.path;
+        loadExtensions();
+        alert(`PHP ${ver} downloaded and ready!`);
     } else {
         alert(res.error);
     }
