@@ -3,27 +3,31 @@ const { app, BrowserWindow, ipcMain, dialog, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const https = require('https');
-const http = require('http'); // Added for http redirects
+const http = require('http');
 const { exec, spawn } = require('child_process');
 const AdmZip = require('adm-zip'); 
 const portfinder = require('portfinder');
 
 // --- UTILS ---
 
-function copyFolderRecursiveSync(source, target, excludeName) {
+function copyFolderRecursiveSync(source, target, exclusions = []) {
   if (!fs.existsSync(target)) fs.mkdirSync(target, { recursive: true });
 
   if (fs.lstatSync(source).isDirectory()) {
     const files = fs.readdirSync(source);
     files.forEach((file) => {
-      if (excludeName && file === excludeName) return;
+      if (exclusions.includes(file)) return;
 
       const curSource = path.join(source, file);
       const curTarget = path.join(target, file);
-      if (fs.lstatSync(curSource).isDirectory()) {
-        copyFolderRecursiveSync(curSource, curTarget, excludeName);
-      } else {
-        fs.copyFileSync(curSource, curTarget);
+      try {
+        if (fs.lstatSync(curSource).isDirectory()) {
+          copyFolderRecursiveSync(curSource, curTarget, exclusions);
+        } else {
+          fs.copyFileSync(curSource, curTarget);
+        }
+      } catch (e) {
+        console.warn(`Skipped file ${file}: ${e.message}`);
       }
     });
   }
@@ -41,9 +45,7 @@ function downloadFile(url, dest, onProgress) {
     };
 
     const request = pkg.get(url, options, (response) => {
-      // Handle Redirects (301, 302, 303, 307, 308)
       if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
-        console.log(`Redirecting to: ${response.headers.location}`);
         downloadFile(response.headers.location, dest, onProgress)
           .then(resolve)
           .catch(reject);
@@ -51,7 +53,7 @@ function downloadFile(url, dest, onProgress) {
       }
 
       if (response.statusCode !== 200) {
-        reject(new Error(`Failed to download. Status Code: ${response.statusCode} URL: ${url}`));
+        reject(new Error(`Failed to download. Status Code: ${response.statusCode}`));
         return;
       }
 
@@ -71,13 +73,12 @@ function downloadFile(url, dest, onProgress) {
 
       response.on('end', () => {
         file.end();
-        // Validate file size (PHP zips are usually > 20MB)
         fs.stat(dest, (err, stats) => {
             if (err) {
                 reject(err);
-            } else if (stats.size < 5 * 1024 * 1024) { // Less than 5MB is definitely suspicious
+            } else if (stats.size < 1024 * 1024) { 
                 fs.unlink(dest, () => {});
-                reject(new Error("Downloaded file is too small/corrupt. (Likely an error page)"));
+                reject(new Error("Downloaded file is too small/corrupt."));
             } else {
                 resolve();
             }
@@ -101,7 +102,7 @@ async function extractZip(source, target) {
   return new Promise((resolve, reject) => {
     try {
       const zip = new AdmZip(source);
-      zip.extractAllTo(target, true); // overwrite = true
+      zip.extractAllTo(target, true);
       resolve();
     } catch (e) {
       reject(new Error("Extraction failed: " + e.message));
@@ -111,10 +112,7 @@ async function extractZip(source, target) {
 
 function findPhpBinaryDir(startDir) {
   const phpExe = process.platform === 'win32' ? 'php.exe' : 'php';
-  
-  if (fs.existsSync(path.join(startDir, phpExe))) {
-    return startDir;
-  }
+  if (fs.existsSync(path.join(startDir, phpExe))) return startDir;
 
   const files = fs.readdirSync(startDir);
   for (const file of files) {
@@ -129,22 +127,15 @@ function findPhpBinaryDir(startDir) {
 
 async function verifyPhp(rootDir) {
   const actualPhpDir = findPhpBinaryDir(rootDir);
-  
-  if (!actualPhpDir) {
-    throw new Error("Verification Failed: php.exe not found in extracted archive.");
-  }
+  if (!actualPhpDir) throw new Error("Verification Failed: php.exe not found.");
 
   const phpExe = process.platform === 'win32' ? 'php.exe' : 'php';
   const phpPath = path.join(actualPhpDir, phpExe);
 
   return new Promise((resolve, reject) => {
     exec(`"${phpPath}" -v`, (err, stdout) => {
-      if (err) {
-        if (stdout && stdout.includes('PHP')) {
-            resolve(actualPhpDir);
-        } else {
-            reject(new Error("Verification Failed: php executable is corrupt or incompatible."));
-        }
+      if (err && !stdout.includes('PHP')) {
+        reject(new Error("Verification Failed: php executable is incompatible."));
       } else if (stdout.includes('PHP')) {
         resolve(actualPhpDir);
       } else {
@@ -185,22 +176,16 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) createWindow();
-});
-
 // --- IPC HANDLERS ---
 
 ipcMain.handle('select-folder', async () => {
-  const result = await dialog.showOpenDialog({
-    properties: ['openDirectory']
-  });
+  const result = await dialog.showOpenDialog({ properties: ['openDirectory'] });
   return result.filePaths[0];
 });
 
 ipcMain.handle('select-file', async (event, extensions) => {
   const result = await dialog.showOpenDialog({
-    filters: [{ name: 'Images', extensions: extensions || ['png', 'ico'] }],
+    filters: [{ name: 'Files', extensions: extensions || ['*'] }],
     properties: ['openFile']
   });
   return result.filePaths[0];
@@ -214,22 +199,14 @@ ipcMain.handle('copy-to-clipboard', async (event, text) => {
 ipcMain.handle('get-php-cache', async () => {
     const cacheDir = path.join(app.getPath('userData'), 'php-cache');
     const results = {};
-    
     if (!fs.existsSync(cacheDir)) return results;
     
-    // Check standard versions
-    const versions = ['8.3', '8.2', '8.1'];
-    
-    for (const ver of versions) {
+    ['8.3', '8.2', '8.1'].forEach(ver => {
         const possiblePath = path.join(cacheDir, `php-${ver}`);
-        if (fs.existsSync(possiblePath)) {
-            const binaryDir = findPhpBinaryDir(possiblePath);
-            if (binaryDir) {
-                results[ver] = binaryDir;
-            }
+        if (fs.existsSync(possiblePath) && findPhpBinaryDir(possiblePath)) {
+            results[ver] = findPhpBinaryDir(possiblePath);
         }
-    }
-    
+    });
     return results;
 });
 
@@ -244,7 +221,7 @@ ipcMain.handle('download-php', async (event, version) => {
   };
   
   const filename = filenames[version];
-  if (!filename) return { success: false, error: 'Unknown version selected' };
+  if (!filename) return { success: false, error: 'Unknown version' };
 
   const zipPath = path.join(cacheDir, filename);
   const extractPath = path.join(cacheDir, `php-${version}`);
@@ -253,53 +230,29 @@ ipcMain.handle('download-php', async (event, version) => {
     const primaryUrl = `https://windows.php.net/downloads/releases/${filename}`;
     const archiveUrl = `https://windows.php.net/downloads/releases/archives/${filename}`;
 
-    let needsDownload = true;
-    
-    if (fs.existsSync(zipPath)) {
-        const stats = fs.statSync(zipPath);
-        if (stats.size > 5000000) {
-            needsDownload = false;
-        } else {
-            fs.unlinkSync(zipPath);
-        }
-    }
-
-    if (needsDownload) {
+    if (!fs.existsSync(zipPath) || fs.statSync(zipPath).size < 5000000) {
        try {
-          mainWindow.webContents.send('download-progress', { percent: 0, status: 'Connecting to primary server...' });
+          mainWindow.webContents.send('download-progress', { percent: 0, status: 'Connecting...' });
           await downloadFile(primaryUrl, zipPath, (percent, current, total) => {
             mainWindow.webContents.send('download-progress', { percent, current, total, status: 'Downloading...' });
           });
        } catch (e) {
-          console.log("Primary download failed, trying archive...", e.message);
-          mainWindow.webContents.send('download-progress', { percent: 0, status: 'Trying archive server...' });
+          mainWindow.webContents.send('download-progress', { percent: 0, status: 'Trying archive...' });
           await downloadFile(archiveUrl, zipPath, (percent, current, total) => {
-            mainWindow.webContents.send('download-progress', { percent, current, total, status: 'Downloading from archive...' });
+            mainWindow.webContents.send('download-progress', { percent, current, total, status: 'Downloading archive...' });
           });
        }
     }
 
-    mainWindow.webContents.send('download-progress', { percent: 100, status: 'Extracting files...' });
-    
-    if (fs.existsSync(extractPath)) {
-      try { fs.rmSync(extractPath, { recursive: true, force: true }); } catch(e) {}
-    }
+    mainWindow.webContents.send('download-progress', { percent: 100, status: 'Extracting...' });
+    if (fs.existsSync(extractPath)) fs.rmSync(extractPath, { recursive: true, force: true });
     fs.mkdirSync(extractPath, { recursive: true });
 
-    try {
-        await extractZip(zipPath, extractPath);
-    } catch (zipErr) {
-        if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
-        throw new Error("Corrupt ZIP file detected and deleted. Please try again.");
-    }
-
-    mainWindow.webContents.send('download-progress', { percent: 100, status: 'Verifying binary...' });
+    await extractZip(zipPath, extractPath);
     const finalPath = await verifyPhp(extractPath);
 
     return { success: true, path: finalPath };
-
   } catch (error) {
-    console.error(error);
     return { success: false, error: error.message };
   }
 });
@@ -307,35 +260,39 @@ ipcMain.handle('download-php', async (event, version) => {
 ipcMain.handle('generate-app', async (event, config) => {
   try {
     const sourceRoot = config.sourcePath;
+    // Enforce vnbuild usage
     const buildDir = path.join(sourceRoot, 'vnbuild');
     const wwwDir = path.join(buildDir, 'www');
+    const binDir = path.join(buildDir, 'bin');
     
-    // Create build directories
     if (!fs.existsSync(buildDir)) fs.mkdirSync(buildDir, { recursive: true });
     
-    // Clean www and bin to ensure freshness, but keep node_modules
+    // Clean previous build files but keep node_modules if it exists to save install time
     if (fs.existsSync(wwwDir)) fs.rmSync(wwwDir, { recursive: true, force: true });
-    const binDir = path.join(buildDir, 'bin');
     if (fs.existsSync(binDir)) fs.rmSync(binDir, { recursive: true, force: true });
 
-    // Copy project files to vnbuild/www (excluding vnbuild itself to avoid recursion)
+    // Copy project files to vnbuild/www, excluding build artifacts and git
+    const exclusions = ['vnbuild', '.git', '.vscode', 'node_modules', 'dist', 'release', 'out'];
     fs.mkdirSync(wwwDir, { recursive: true });
-    copyFolderRecursiveSync(sourceRoot, wwwDir, 'vnbuild');
+    copyFolderRecursiveSync(sourceRoot, wwwDir, exclusions);
 
     // Handle PHP
     if (config.enablePhp && config.phpPath) {
        const phpDest = path.join(binDir, 'php');
-       fs.mkdirSync(path.join(buildDir, 'bin'), { recursive: true });
+       fs.mkdirSync(binDir, { recursive: true });
        
-       copyFolderRecursiveSync(config.phpPath, phpDest);
+       // Copy PHP files
+       copyFolderRecursiveSync(config.phpPath, phpDest, []);
        
-       let extensionStr = '';
-       extensionStr += `extension_dir = "ext"\n`;
+       // Validate PHP copy
+       const phpExeCheck = path.join(phpDest, 'php.exe');
+       if (!fs.existsSync(phpExeCheck)) {
+           throw new Error("Failed to copy php.exe to build directory. Check your PHP source folder.");
+       }
        
-       if (config.phpExtensions && Array.isArray(config.phpExtensions)) {
-           config.phpExtensions.forEach(ext => {
-             extensionStr += `extension=php_${ext}.dll\n`;
-           });
+       let extensionStr = `extension_dir = "ext"\n`;
+       if (config.phpExtensions) {
+           config.phpExtensions.forEach(ext => extensionStr += `extension=php_${ext}.dll\n`);
        }
 
        const phpIni = `
@@ -360,22 +317,12 @@ ${extensionStr}
        fs.writeFileSync(path.join(phpDest, 'php.ini'), phpIni);
     }
 
-    // Generate configuration files inside vnbuild
-    const packageJson = generatePackageJson(config);
-    fs.writeFileSync(path.join(buildDir, 'package.json'), packageJson);
-
-    const mainJs = generateMainJs(config);
-    fs.writeFileSync(path.join(buildDir, 'main.js'), mainJs);
-
-    // Create helper scripts inside vnbuild
-    const buildBat = `@echo off
-echo Installing Dependencies...
-call npm install
-echo Building Application...
-call npm run build
-echo DONE!
-pause`;
-    fs.writeFileSync(path.join(buildDir, 'build.bat'), buildBat);
+    fs.writeFileSync(path.join(buildDir, 'package.json'), generatePackageJson(config));
+    fs.writeFileSync(path.join(buildDir, 'main.js'), generateMainJs(config));
+    fs.writeFileSync(path.join(buildDir, 'build.bat'), 
+`@echo off
+npm install && npm run build
+pause`);
 
     return { success: true };
   } catch (error) {
@@ -384,63 +331,50 @@ pause`;
   }
 });
 
-// --- BUILD COMMAND HANDLER ---
 ipcMain.handle('build-app', async (event, sourceRoot) => {
     return new Promise((resolve, reject) => {
         const isWin = process.platform === 'win32';
         const npmCmd = isWin ? 'npm.cmd' : 'npm';
         const buildDir = path.join(sourceRoot, 'vnbuild');
         
-        // Helper to send log
         const sendLog = (msg, isError = false) => {
-            mainWindow.webContents.send('download-progress', { 
-                type: 'build-log', 
-                msg: msg, 
-                error: isError 
-            });
+            mainWindow.webContents.send('download-progress', { type: 'build-log', msg, error: isError });
         };
 
         if (!fs.existsSync(buildDir)) {
-            sendLog('Build directory "vnbuild" not found. Please Generate Config first.', true);
-            return resolve({ success: false, error: 'vnbuild not found' });
+            return resolve({ success: false, error: 'vnbuild not found. Generate config first.' });
         }
 
-        // 1. Check NPM
         exec(`${npmCmd} -v`, (err) => {
             if (err) {
-                sendLog('ERROR: Node.js/NPM is not found in system PATH.', true);
-                sendLog('Please install Node.js (LTS) from nodejs.org to use the automated build feature.', true);
+                sendLog('Node.js/NPM not found in PATH.', true);
                 return resolve({ success: false, error: 'NPM not found' });
             }
 
-            // 2. NPM Install inside vnbuild
-            sendLog(`Running "npm install" in ${buildDir}...`);
+            sendLog(`Installing dependencies in ${buildDir}...`);
             const install = spawn(npmCmd, ['install'], { cwd: buildDir, shell: true });
 
-            install.stdout.on('data', (data) => sendLog(data.toString()));
-            install.stderr.on('data', (data) => sendLog(data.toString()));
+            install.stdout.on('data', (d) => sendLog(d.toString()));
+            install.stderr.on('data', (d) => sendLog(d.toString()));
 
             install.on('close', (code) => {
                 if (code !== 0) {
-                    sendLog(`npm install failed with code ${code}`, true);
+                    sendLog(`npm install failed: code ${code}`, true);
                     return resolve({ success: false, error: 'Install failed' });
                 }
                 
-                sendLog('"npm install" completed. Starting build...');
-                
-                // 3. NPM Run Build inside vnbuild
+                sendLog('Building application...');
                 const build = spawn(npmCmd, ['run', 'build'], { cwd: buildDir, shell: true });
                 
-                build.stdout.on('data', (data) => sendLog(data.toString()));
-                build.stderr.on('data', (data) => sendLog(data.toString())); // warnings often come in stderr
+                build.stdout.on('data', (d) => sendLog(d.toString()));
+                build.stderr.on('data', (d) => sendLog(d.toString()));
 
-                build.on('close', (buildCode) => {
-                    if (buildCode !== 0) {
-                        sendLog(`npm run build failed with code ${buildCode}`, true);
+                build.on('close', (bCode) => {
+                    if (bCode !== 0) {
+                        sendLog(`Build failed: code ${bCode}`, true);
                         return resolve({ success: false, error: 'Build failed' });
                     }
-                    
-                    sendLog('Build command finished successfully!');
+                    sendLog('Build Success!');
                     resolve({ success: true });
                 });
             });
@@ -456,56 +390,28 @@ function generatePackageJson(c) {
   if (c.targetPortable) targets.push("portable");
   if (c.targetUnpacked) targets.push("dir");
 
-  const extraResources = [];
-  if (c.enablePhp) {
-    // Path relative to vnbuild/package.json
-    extraResources.push({
-      "from": "bin/php",
-      "to": "php",
-      "filter": ["**/*"]
-    });
-  }
-
+  // Ensure "dist" is inside vnbuild (implicitly handled by running in vnbuild dir)
+  // "asar": false is CRITICAL for PHP to read files and spawn correctly from a real path
   const buildConfig = {
     appId: `com.visualneo.${c.appName.replace(/\s+/g, '').toLowerCase()}`,
     productName: c.productName,
-    // Explicitly include main.js and the www folder content
-    files: [
-      "main.js",
-      "www/**/*"
-    ],
-    extraResources: extraResources,
+    files: ["main.js", "www/**/*"],
+    extraResources: c.enablePhp ? [{ "from": "bin/php", "to": "php", "filter": ["**/*"] }] : [],
     directories: { "output": "dist" },
-    win: {
-      target: targets,
-      icon: c.iconPath ? path.basename(c.iconPath) : undefined
-    },
-    nsis: {
-      oneClick: false,
-      allowToChangeInstallationDirectory: true,
-      shortcutName: c.productName,
-      createDesktopShortcut: true,
-      createStartMenuShortcut: true
-    }
+    asar: false, 
+    win: { target: targets, icon: c.iconPath ? path.basename(c.iconPath) : undefined },
+    nsis: { oneClick: false, allowToChangeInstallationDirectory: true, createDesktopShortcut: true }
   };
 
   const pkg = {
     name: c.appName.toLowerCase().replace(/\s+/g, '-'),
     version: c.version,
-    description: `${c.productName} - Powered by VisualNEO`,
+    description: c.productName,
     main: "main.js",
     author: c.author,
-    scripts: {
-      "start": "electron .",
-      "build": "electron-builder"
-    },
-    dependencies: {
-      "portfinder": "^1.0.32"
-    },
-    devDependencies: {
-      "electron": "^29.1.5",
-      "electron-builder": "^24.13.3"
-    },
+    scripts: { "start": "electron .", "build": "electron-builder" },
+    dependencies: { "portfinder": "^1.0.32" },
+    devDependencies: { "electron": "^29.1.5", "electron-builder": "^24.13.3" },
     build: buildConfig
   };
 
@@ -513,17 +419,12 @@ function generatePackageJson(c) {
 }
 
 function generateMainJs(c) {
-  return `/**
- * Generated by VisualNEO Desktop Builder
- */
-
-const { app, BrowserWindow, Tray, Menu, ipcMain, shell, screen } = require('electron');
+  return `const { app, BrowserWindow, Tray, Menu, ipcMain, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
 const portfinder = require('portfinder');
 
-// --- CONFIGURATION ---
 const CONFIG = {
   title: "${c.productName}",
   entry: "${c.entryPoint}",
@@ -539,79 +440,60 @@ const CONFIG = {
   nativeFrame: ${c.nativeFrame}
 };
 
-// --- GLOBALS ---
-let mainWindow;
-let tray = null;
-let isQuitting = false;
-let phpProcess = null;
-let serverUrl = null;
+let mainWindow, tray = null, isQuitting = false, phpProcess = null, serverUrl = null;
 
-// Correctly resolve web root whether packaged or running in vnbuild dev mode
+// Because 'asar: false', __dirname is a real path on disk.
 const webRoot = path.join(__dirname, 'www');
-
 const statePath = path.join(app.getPath('userData'), 'window-state.json');
 
 function loadState() {
-  try {
-    return JSON.parse(fs.readFileSync(statePath, 'utf8'));
-  } catch (e) {
-    return { width: ${c.width}, height: ${c.height} };
-  }
+  try { return JSON.parse(fs.readFileSync(statePath, 'utf8')); } 
+  catch (e) { return { width: ${c.width}, height: ${c.height} }; }
 }
 
 function saveState() {
   if (!mainWindow) return;
   const bounds = mainWindow.getBounds();
   const isMaximized = mainWindow.isMaximized();
-  const state = { ...bounds, isMaximized };
-  fs.writeFileSync(statePath, JSON.stringify(state));
+  fs.writeFileSync(statePath, JSON.stringify({ ...bounds, isMaximized }));
 }
 
 async function startPhpServer() {
   return new Promise(async (resolve, reject) => {
-    if (!CONFIG.usePhp) {
-      serverUrl = null;
-      resolve(null);
-      return;
-    }
+    if (!CONFIG.usePhp) { serverUrl = null; return resolve(null); }
 
     try {
       const port = await portfinder.getPortPromise({ port: CONFIG.phpPort });
       
-      let phpBin = '';
+      // Resolve PHP binary path
+      let phpBin;
       if (app.isPackaged) {
-        // Production: resources/php/php.exe
-        phpBin = path.join(process.resourcesPath, 'php', 'php.exe');
+         phpBin = path.join(process.resourcesPath, 'php', 'php.exe');
       } else {
-        // Dev (vnbuild): bin/php/php.exe
-        phpBin = path.join(__dirname, 'bin', 'php', 'php.exe');
+         phpBin = path.join(__dirname, 'bin', 'php', 'php.exe');
       }
       
-      // Check if PHP exists to prevent spawn ENOENT crash
       if (!fs.existsSync(phpBin)) {
-         console.error("PHP Binary not found at: " + phpBin);
-         // Fallback for debugging or corrupted builds
-         reject(new Error("PHP binary missing."));
-         return;
+         return reject(new Error("PHP binary not found at: " + phpBin));
       }
       
       const iniPath = path.join(path.dirname(phpBin), 'php.ini');
-
-      console.log("Starting PHP on port " + port);
-      console.log("Document Root: " + webRoot);
       
+      // Spawn PHP with explicit CWD to the webRoot
       phpProcess = spawn(phpBin, ['-S', '127.0.0.1:' + port, '-t', webRoot, '-c', iniPath], {
-        cwd: webRoot
+        cwd: webRoot,
+        stdio: 'ignore', // Detach stdio to prevent hanging if buffer fills, or use 'pipe' for debug
+        windowsHide: true
       });
 
-      phpProcess.stdout.on('data', (data) => console.log(\`PHP: \${data}\`));
-      phpProcess.stderr.on('data', (data) => console.error(\`PHP ERR: \${data}\`));
+      phpProcess.on('error', (err) => {
+        console.error('Failed to spawn PHP:', err);
+      });
 
       serverUrl = \`http://127.0.0.1:\${port}/\`;
-      resolve(serverUrl);
+      setTimeout(resolve, 500, serverUrl); // Give it a moment to spin up
 
     } catch (e) {
-      console.error("Failed to start PHP", e);
       reject(e);
     }
   });
@@ -626,62 +508,40 @@ function killPhp() {
 
 function createWindow() {
   const state = CONFIG.saveState ? loadState() : { width: ${c.width}, height: ${c.height} };
-
   const winConfig = {
-    width: state.width,
-    height: state.height,
-    x: state.x,
-    y: state.y,
-    minWidth: ${c.minWidth || 0},
-    minHeight: ${c.minHeight || 0},
-    resizable: ${c.resizable},
-    fullscreenable: ${c.fullscreenable},
-    kiosk: CONFIG.kiosk,
-    frame: CONFIG.nativeFrame, 
-    center: ${c.center},
-    autoHideMenuBar: true,
-    show: false,
-    webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-      devTools: ${c.devTools},
-    }
+    width: state.width, height: state.height, x: state.x, y: state.y,
+    minWidth: ${c.minWidth || 0}, minHeight: ${c.minHeight || 0},
+    resizable: ${c.resizable}, fullscreenable: ${c.fullscreenable},
+    kiosk: CONFIG.kiosk, frame: CONFIG.nativeFrame, center: ${c.center},
+    autoHideMenuBar: true, show: false,
+    webPreferences: { nodeIntegration: false, contextIsolation: true, devTools: ${c.devTools} }
   };
   
   ${c.iconPath ? `winConfig.icon = path.join(__dirname, '${path.basename(c.iconPath)}');` : ''}
 
   mainWindow = new BrowserWindow(winConfig);
   mainWindow.setMenu(null);
-  mainWindow.removeMenu();
 
-  if (CONFIG.saveState && state.isMaximized) {
-    mainWindow.maximize();
-  }
+  if (CONFIG.saveState && state.isMaximized) mainWindow.maximize();
 
   if (CONFIG.usePhp && serverUrl) {
-    const fullUrl = serverUrl + CONFIG.entry;
-    mainWindow.loadURL(fullUrl);
+    mainWindow.loadURL(serverUrl + CONFIG.entry);
   } else if (CONFIG.entry.startsWith('http')) {
     mainWindow.loadURL(CONFIG.entry);
   } else {
-    // Use webRoot for static files
     mainWindow.loadFile(path.join(webRoot, CONFIG.entry));
   }
 
   ${c.userAgent ? `mainWindow.webContents.setUserAgent("${c.userAgent}");` : ''}
 
-  mainWindow.once('ready-to-show', () => {
-    mainWindow.show();
-  });
-
-  mainWindow.on('close', (event) => {
+  mainWindow.once('ready-to-show', () => mainWindow.show());
+  
+  mainWindow.on('close', (e) => {
     if (CONFIG.saveState) saveState();
-    
     if (CONFIG.minToTray && tray && !isQuitting) {
-      event.preventDefault();
+      e.preventDefault();
       mainWindow.hide();
     }
-    return false;
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -690,97 +550,47 @@ function createWindow() {
   });
   
   if (CONFIG.contextMenu) {
-      mainWindow.webContents.on('context-menu', (e, params) => {
-        Menu.buildFromTemplate([
-           { label: 'Copy', role: 'copy' },
-           { label: 'Paste', role: 'paste' },
-           { type: 'separator' },
-           { label: 'Reload', role: 'reload' }
-        ]).popup();
+      mainWindow.webContents.on('context-menu', () => {
+        Menu.buildFromTemplate([{ label: 'Copy', role: 'copy' }, { label: 'Paste', role: 'paste' }, { type: 'separator' }, { label: 'Reload', role: 'reload' }]).popup();
       });
   }
 }
 
 function createTray() {
   if (!CONFIG.tray) return;
-  
-  const iconName = ${c.iconPath ? `'${path.basename(c.iconPath)}'` : `'appicon.png'`};
+  let iconPath = path.join(__dirname, ${c.iconPath ? `'${path.basename(c.iconPath)}'` : `'appicon.png'`});
+  if (!fs.existsSync(iconPath) && app.isPackaged) iconPath = path.join(process.resourcesPath, ${c.iconPath ? `'${path.basename(c.iconPath)}'` : `'appicon.png'`});
   
   try {
-     // Icon is expected in root (next to main.js) or resources
-     let trayIconPath = path.join(__dirname, iconName);
-     if (!fs.existsSync(trayIconPath) && app.isPackaged) {
-         trayIconPath = path.join(process.resourcesPath, iconName);
-     }
-     
-     tray = new Tray(trayIconPath);
-     
-     const contextMenu = Menu.buildFromTemplate([
-       { label: 'Show Application', click: () => mainWindow.show() },
-       { type: 'separator' },
-       { label: 'Exit', click: () => { isQuitting = true; app.quit(); } }
-     ]);
-     
+     tray = new Tray(iconPath);
      tray.setToolTip(CONFIG.title);
-     tray.setContextMenu(contextMenu);
-     
-     tray.on('click', () => {
-        if (mainWindow.isVisible()) {
-            mainWindow.hide();
-        } else {
-            mainWindow.show();
-        }
-     });
-  } catch (e) {
-     console.log("Tray init error: " + e.message);
-  }
+     tray.setContextMenu(Menu.buildFromTemplate([
+       { label: 'Show', click: () => mainWindow.show() },
+       { label: 'Exit', click: () => { isQuitting = true; app.quit(); } }
+     ]));
+     tray.on('click', () => mainWindow.isVisible() ? mainWindow.hide() : mainWindow.show());
+  } catch (e) {}
 }
 
-if (CONFIG.singleInstance) {
-  const gotTheLock = app.requestSingleInstanceLock();
-  if (!gotTheLock) {
-    app.quit();
-  } else {
-    app.on('second-instance', () => {
-      if (mainWindow) {
-        if (mainWindow.isMinimized()) mainWindow.restore();
-        if (!mainWindow.isVisible()) mainWindow.show();
-        mainWindow.focus();
-      }
-    });
-    
-    initApp();
-  }
+const gotLock = CONFIG.singleInstance ? app.requestSingleInstanceLock() : true;
+if (!gotLock) {
+  app.quit();
 } else {
-  initApp();
-}
-
-function initApp() {
+  app.on('second-instance', () => {
+    if (mainWindow) {
+       if (mainWindow.isMinimized()) mainWindow.restore();
+       mainWindow.focus();
+    }
+  });
+  
   app.whenReady().then(async () => {
     await startPhpServer();
     createWindow();
     createTray();
-
-    app.on('activate', () => {
-      if (BrowserWindow.getAllWindows().length === 0) createWindow();
-    });
-  });
-
-  app.on('window-all-closed', () => {
-    if (CONFIG.runBg && !isQuitting) {
-    } else {
-       if (process.platform !== 'darwin') app.quit();
-    }
   });
   
-  app.on('before-quit', () => {
-    isQuitting = true;
-    killPhp();
-  });
-  
-  app.on('will-quit', () => {
-    killPhp();
-  });
+  app.on('window-all-closed', () => { if (CONFIG.runBg && !isQuitting) {} else if (process.platform !== 'darwin') app.quit(); });
+  app.on('before-quit', () => { isQuitting = true; killPhp(); });
 }
 `;
 }
