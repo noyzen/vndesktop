@@ -549,6 +549,16 @@ ipcMain.handle('generate-app', async (event, config) => {
     const exclusions = ['vnbuild', '.git', '.vscode', 'node_modules', 'dist', 'release', 'out'];
     fs.mkdirSync(wwwDir, { recursive: true });
     copyFolderRecursiveSync(sourceRoot, wwwDir, exclusions);
+    
+    // --- COPY APP ICON ---
+    // We explicitly copy the icon to vnbuild so it is included in the bundle
+    const iconDest = path.join(buildDir, 'app-icon.png');
+    if (config.iconPath && fs.existsSync(config.iconPath)) {
+        try { fs.copyFileSync(config.iconPath, iconDest); } catch(e) { console.error(e); }
+    } else {
+        // Fallback
+        try { fs.copyFileSync(path.join(__dirname, 'public/appicon.png'), iconDest); } catch(e) {}
+    }
 
     if (config.enablePhp && config.phpPath) {
        const phpDest = path.join(binDir, 'php');
@@ -698,8 +708,16 @@ ipcMain.handle('build-app', async (event, sourceRoot) => {
                                     }
                                     // Remove unpacked folder if user didn't request it
                                     if (f === 'win-unpacked' && !config.targetUnpacked) {
-                                        // Use displacement strategy here too if needed, but robust delete usually fine
-                                        await deleteFolderRobust(fullPath);
+                                        // Use same rename-then-delete strategy for win-unpacked
+                                        const trashName = `unpacked_trash_${Date.now()}`;
+                                        const trashPath = path.join(distPath, trashName);
+                                        try {
+                                            fs.renameSync(fullPath, trashPath);
+                                            deleteFolderRobust(trashPath, true); // background
+                                        } catch (renameErr) {
+                                            // If rename fails, try force delete
+                                            await deleteFolderRobust(fullPath); 
+                                        }
                                     }
                                 }
                             }
@@ -710,7 +728,7 @@ ipcMain.handle('build-app', async (event, sourceRoot) => {
                             sendLog('Cleanup warning (minor): ' + e.message, false);
                             resolve({ success: true });
                         }
-                    }, 1500);
+                    }, 2000); // Wait 2s for file handles to release
                 });
             });
         });
@@ -731,10 +749,13 @@ function generatePackageJson(c) {
       extraResources.push({ "from": "www", "to": "www_source", "filter": ["**/*"] });
   }
 
+  // Include the app-icon.png we copied in files list
+  const files = c.enablePhp ? ["main.js", "app-icon.png"] : ["main.js", "app-icon.png", "www/**/*"];
+
   const buildConfig = {
     appId: `com.visualneo.${c.appName.replace(/\s+/g, '').toLowerCase()}`,
     productName: c.productName,
-    files: c.enablePhp ? ["main.js"] : ["main.js", "www/**/*"], 
+    files: files, 
     extraResources: extraResources,
     directories: { "output": "dist" },
     asar: true,
@@ -908,7 +929,7 @@ function createWindow() {
     webPreferences: { nodeIntegration: false, contextIsolation: true, devTools: ${c.devTools} }
   };
 
-  ${c.iconPath ? `winConfig.icon = path.join(__dirname, '${path.basename(c.iconPath)}');` : ''}
+  ${c.iconPath ? `winConfig.icon = path.join(__dirname, 'app-icon.png');` : ''}
 
   mainWindow = new BrowserWindow(winConfig);
   mainWindow.setMenu(null);
@@ -953,20 +974,26 @@ function createWindow() {
 
 function createTray() {
   if (!CONFIG.tray) return;
-  let iconPath = path.join(__dirname, ${c.iconPath ? `'${path.basename(c.iconPath)}'` : `'appicon.png'`});
-  if (process.resourcesPath && !fs.existsSync(iconPath)) {
-     iconPath = path.join(process.resourcesPath, ${c.iconPath ? `'${path.basename(c.iconPath)}'` : `'appicon.png'`});
-  }
+  // IMPORTANT: The icon is always copied to the root by the builder now
+  const iconPath = path.join(__dirname, 'app-icon.png');
 
   try {
-     tray = new Tray(iconPath);
-     tray.setToolTip(CONFIG.title);
-     tray.setContextMenu(Menu.buildFromTemplate([
-       { label: 'Open', click: () => mainWindow.show() },
-       { label: 'Exit', click: () => { isQuitting = true; app.quit(); } }
-     ]));
-     tray.on('click', () => mainWindow.isVisible() ? mainWindow.hide() : mainWindow.show());
-  } catch (e) {}
+     if(fs.existsSync(iconPath)) {
+         tray = new Tray(iconPath);
+         tray.setToolTip(CONFIG.title);
+         tray.setContextMenu(Menu.buildFromTemplate([
+           { label: 'Open', click: () => mainWindow.show() },
+           { label: 'Exit', click: () => { isQuitting = true; app.quit(); } }
+         ]));
+         tray.on('click', () => mainWindow.isVisible() ? mainWindow.hide() : mainWindow.show());
+     } else {
+         throw new Error("Icon not found");
+     }
+  } catch (e) {
+     console.error("Tray failed", e);
+     // FALLBACK: If Tray fails, ensure taskbar button is visible so app is not lost
+     if(mainWindow) mainWindow.setSkipTaskbar(false);
+  }
 }
 
 const gotLock = CONFIG.singleInstance ? app.requestSingleInstanceLock() : true;
