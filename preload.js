@@ -1,3 +1,4 @@
+
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('api', {
@@ -5,7 +6,7 @@ contextBridge.exposeInMainWorld('api', {
   selectFile: (extensions) => ipcRenderer.invoke('select-file', extensions),
   generateApp: (config) => ipcRenderer.invoke('generate-app', config),
   downloadPhp: (version) => ipcRenderer.invoke('download-php', version),
-  // New listener for download progress
+  buildApp: (targetPath) => ipcRenderer.invoke('build-app', targetPath),
   onDownloadProgress: (callback) => ipcRenderer.on('download-progress', (_event, value) => callback(value))
 });
 

@@ -43,6 +43,7 @@ phpToggle.addEventListener('change', () => {
 
 // Logger
 const consoleOutput = document.getElementById('consoleOutput');
+
 function log(msg, type = 'info') {
   const div = document.createElement('div');
   div.classList.add('log-line');
@@ -50,12 +51,31 @@ function log(msg, type = 'info') {
   if(type === 'error') div.classList.add('log-error');
   if(type === 'info') div.classList.add('log-info');
   if(type === 'warn') div.classList.add('log-warn');
+  if(type === 'cmd') div.classList.add('log-cmd');
+  
+  // strip colors if coming from raw terminal output sometimes
+  const cleanMsg = msg.replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '');
   
   const time = new Date().toLocaleTimeString();
-  div.innerText = `[${time}] ${msg}`;
+  div.innerText = `[${time}] ${cleanMsg}`;
   consoleOutput.appendChild(div);
   consoleOutput.scrollTop = consoleOutput.scrollHeight;
 }
+
+// Console Toolbar Actions
+document.getElementById('btnClearLogs').addEventListener('click', () => {
+  consoleOutput.innerHTML = '';
+});
+
+document.getElementById('btnCopyLogs').addEventListener('click', () => {
+  const text = consoleOutput.innerText;
+  navigator.clipboard.writeText(text).then(() => {
+     const btn = document.getElementById('btnCopyLogs');
+     const originalHtml = btn.innerHTML;
+     btn.innerHTML = '<i class="fa-solid fa-check"></i> Copied';
+     setTimeout(() => btn.innerHTML = originalHtml, 2000);
+  });
+});
 
 // --- PHP EXTENSION MANAGER UI ---
 const defaultExtensions = [
@@ -91,9 +111,15 @@ renderExtensions();
 
 // --- DOWNLOADER LOGIC ---
 
-// Listen for progress events from Main Process via Preload API
 if (window.api && window.api.onDownloadProgress) {
     window.api.onDownloadProgress((data) => {
+        if(data.type === 'build-log') {
+             // Build log stream
+             if(data.error) log(data.msg, 'error');
+             else log(data.msg, 'cmd');
+             return;
+        }
+
         const modal = document.getElementById('progressModal');
         const bar = document.getElementById('progressBar');
         const percentTxt = document.getElementById('progressPercent');
@@ -130,7 +156,7 @@ document.getElementById('btnDownloadPhp').addEventListener('click', async () => 
   try {
     const result = await window.api.downloadPhp(version);
     
-    modal.classList.remove('active'); // Hide modal on finish
+    modal.classList.remove('active'); 
     
     if (result.success) {
       document.getElementById('phpPath').value = result.path;
@@ -173,14 +199,13 @@ document.getElementById('btnSelectIcon').addEventListener('click', async () => {
   }
 });
 
-// Generate Action
-document.getElementById('btnGenerate').addEventListener('click', async () => {
-  // Validation
+// Config Collector
+function getAppConfig() {
   const sourcePath = document.getElementById('sourcePath').value;
   if (!sourcePath) {
     log('Error: Please select a Source Folder first.', 'error');
     alert('Please select a Web App Source Folder.');
-    return;
+    return null;
   }
 
   const enablePhp = document.getElementById('enablePhp').checked;
@@ -189,14 +214,13 @@ document.getElementById('btnGenerate').addEventListener('click', async () => {
   if (enablePhp && !phpPath) {
     log('Error: PHP is enabled but no PHP folder selected/downloaded.', 'error');
     alert('Please select or download a PHP version.');
-    return;
+    return null;
   }
 
-  // Merge Extensions
   const extraExt = document.getElementById('extraExtensions').value.split(',').map(s => s.trim()).filter(s => s);
   const finalExtensions = [...selectedExtensions, ...extraExt];
 
-  const config = {
+  return {
     // Project
     appName: document.getElementById('appName').value || 'my-app',
     productName: document.getElementById('productName').value || 'My App',
@@ -214,7 +238,7 @@ document.getElementById('btnGenerate').addEventListener('click', async () => {
     fullscreenable: document.getElementById('fullscreenable').checked,
     kiosk: document.getElementById('kiosk').checked,
     saveState: document.getElementById('saveState').checked,
-    nativeFrame: true, // Enforced in this version
+    nativeFrame: true, 
     center: document.getElementById('center').checked,
 
     // PHP
@@ -241,26 +265,70 @@ document.getElementById('btnGenerate').addEventListener('click', async () => {
     targetPortable: document.getElementById('targetPortable').checked,
     targetUnpacked: document.getElementById('targetUnpacked').checked,
   };
+}
 
-  log('Starting Application Generation...', 'info');
-  
+// Generate Only
+document.getElementById('btnGenerateOnly').addEventListener('click', async () => {
+  const config = getAppConfig();
+  if(!config) return;
+
+  log('Generating Configuration Files...', 'info');
   try {
     const result = await window.api.generateApp(config);
+    if (result.success) {
+       log('Configuration Generated Successfully.', 'success');
+    } else {
+       log(`Error: ${result.error}`, 'error');
+    }
+  } catch(e) {
+    log(e.message, 'error');
+  }
+});
+
+// Full Build
+document.getElementById('btnBuildFull').addEventListener('click', async () => {
+  const config = getAppConfig();
+  if(!config) return;
+
+  // 1. Generate
+  log('--- STARTING AUTOMATED BUILD ---', 'info');
+  log('Step 1: Generating Config...', 'info');
+  
+  const genResult = await window.api.generateApp(config);
+  if (!genResult.success) {
+    log(`Generation Failed: ${genResult.error}`, 'error');
+    return;
+  }
+  log('Configuration files created.', 'success');
+
+  // 2. Build via Main Process
+  log('Step 2: Installing dependencies & Building...', 'info');
+  log('NOTE: This requires Node.js to be installed on your system.', 'warn');
+  
+  const btn = document.getElementById('btnBuildFull');
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Building...';
+
+  try {
+    const result = await window.api.buildApp(config.sourcePath);
     
     if (result.success) {
-      log('SUCCESS! Application generated.', 'success');
-      log(`Target: ${config.sourcePath}`, 'info');
-      
-      log('-----------------------------------');
-      log('NEXT STEPS:', 'warn');
-      log('1. Open terminal in your source folder.');
-      log('2. Run "npm install"');
-      log('3. Run "npm run build"');
-      log('-----------------------------------');
+       log('---------------------------------', 'success');
+       log('BUILD COMPLETED SUCCESSFULLY!', 'success');
+       log('Check the "dist" folder inside your project.', 'info');
+       log('---------------------------------', 'success');
+       alert('Build Complete!');
     } else {
-      log(`Generation Failed: ${result.error}`, 'error');
+       log('---------------------------------', 'error');
+       log('BUILD FAILED.', 'error');
+       log('Please check the logs above for details.', 'error');
+       log('Ensure Node.js is installed and accessible.', 'warn');
+       log('---------------------------------', 'error');
     }
   } catch (e) {
-    log(`Unexpected Error: ${e.message}`, 'error');
+     log(`Critical Error: ${e.message}`, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="fa-solid fa-play-circle"></i> BUILD EXECUTABLE';
   }
 });

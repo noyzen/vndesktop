@@ -138,7 +138,6 @@ async function verifyPhp(rootDir) {
   return new Promise((resolve, reject) => {
     exec(`"${phpPath}" -v`, (err, stdout) => {
       if (err) {
-        // If exit code is non-zero but we get output, it might still work, but proceed with caution
         if (stdout && stdout.includes('PHP')) {
             resolve(actualPhpDir);
         } else {
@@ -207,10 +206,8 @@ ipcMain.handle('select-file', async (event, extensions) => {
 
 ipcMain.handle('download-php', async (event, version) => {
   const cacheDir = path.join(app.getPath('userData'), 'php-cache');
-  // Ensure cache dir exists
   if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
 
-  // Specific Filenames for versions
   const filenames = {
       '8.3': 'php-8.3.12-nts-Win32-vs16-x64.zip',
       '8.2': 'php-8.2.24-nts-Win32-vs16-x64.zip',
@@ -224,20 +221,16 @@ ipcMain.handle('download-php', async (event, version) => {
   const extractPath = path.join(cacheDir, `php-${version}`);
 
   try {
-    // Smart URLs
     const primaryUrl = `https://windows.php.net/downloads/releases/${filename}`;
     const archiveUrl = `https://windows.php.net/downloads/releases/archives/${filename}`;
 
-    // 1. Download Logic
     let needsDownload = true;
     
-    // Check if existing file is valid
     if (fs.existsSync(zipPath)) {
         const stats = fs.statSync(zipPath);
-        if (stats.size > 5000000) { // > 5MB
+        if (stats.size > 5000000) {
             needsDownload = false;
         } else {
-            // Found a corrupt/small file, delete it
             fs.unlinkSync(zipPath);
         }
     }
@@ -257,10 +250,8 @@ ipcMain.handle('download-php', async (event, version) => {
        }
     }
 
-    // 2. Extract Logic
     mainWindow.webContents.send('download-progress', { percent: 100, status: 'Extracting files...' });
     
-    // Clean previous extraction
     if (fs.existsSync(extractPath)) {
       try { fs.rmSync(extractPath, { recursive: true, force: true }); } catch(e) {}
     }
@@ -269,12 +260,10 @@ ipcMain.handle('download-php', async (event, version) => {
     try {
         await extractZip(zipPath, extractPath);
     } catch (zipErr) {
-        // If extraction fails, the zip is likely corrupt. Delete it so next try re-downloads.
         if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
         throw new Error("Corrupt ZIP file detected and deleted. Please try again.");
     }
 
-    // 3. Verify Logic
     mainWindow.webContents.send('download-progress', { percent: 100, status: 'Verifying binary...' });
     const finalPath = await verifyPhp(extractPath);
 
@@ -290,7 +279,6 @@ ipcMain.handle('generate-app', async (event, config) => {
   try {
     const targetDir = config.sourcePath;
     
-    // 1. Handle PHP Integration
     if (config.enablePhp && config.phpPath) {
        const phpDest = path.join(targetDir, 'bin', 'php');
        if (fs.existsSync(phpDest)) {
@@ -298,10 +286,8 @@ ipcMain.handle('generate-app', async (event, config) => {
        }
        fs.mkdirSync(path.join(targetDir, 'bin'), { recursive: true });
        
-       // Copy PHP binaries
        copyFolderRecursiveSync(config.phpPath, phpDest);
        
-       // Generate custom php.ini
        let extensionStr = '';
        extensionStr += `extension_dir = "ext"\n`;
        
@@ -333,15 +319,12 @@ ${extensionStr}
        fs.writeFileSync(path.join(phpDest, 'php.ini'), phpIni);
     }
 
-    // 2. Generate package.json
     const packageJson = generatePackageJson(config);
     fs.writeFileSync(path.join(targetDir, 'package.json'), packageJson);
 
-    // 3. Generate main.js
     const mainJs = generateMainJs(config);
     fs.writeFileSync(path.join(targetDir, 'main.js'), mainJs);
 
-    // 4. Generate Build Scripts
     const buildBat = `@echo off
 echo Installing Dependencies...
 call npm install
@@ -361,6 +344,64 @@ npm run build`;
     console.error(error);
     return { success: false, error: error.message };
   }
+});
+
+// --- BUILD COMMAND HANDLER ---
+ipcMain.handle('build-app', async (event, targetDir) => {
+    return new Promise((resolve, reject) => {
+        const isWin = process.platform === 'win32';
+        const npmCmd = isWin ? 'npm.cmd' : 'npm';
+        
+        // Helper to send log
+        const sendLog = (msg, isError = false) => {
+            mainWindow.webContents.send('download-progress', { 
+                type: 'build-log', 
+                msg: msg, 
+                error: isError 
+            });
+        };
+
+        // 1. Check NPM
+        exec(`${npmCmd} -v`, (err) => {
+            if (err) {
+                sendLog('ERROR: Node.js/NPM is not found in system PATH.', true);
+                sendLog('Please install Node.js (LTS) from nodejs.org to use the automated build feature.', true);
+                return resolve({ success: false, error: 'NPM not found' });
+            }
+
+            // 2. NPM Install
+            sendLog('Running "npm install"... this may take a minute.');
+            const install = spawn(npmCmd, ['install'], { cwd: targetDir, shell: true });
+
+            install.stdout.on('data', (data) => sendLog(data.toString()));
+            install.stderr.on('data', (data) => sendLog(data.toString()));
+
+            install.on('close', (code) => {
+                if (code !== 0) {
+                    sendLog(`npm install failed with code ${code}`, true);
+                    return resolve({ success: false, error: 'Install failed' });
+                }
+                
+                sendLog('"npm install" completed. Starting build...');
+                
+                // 3. NPM Run Build
+                const build = spawn(npmCmd, ['run', 'build'], { cwd: targetDir, shell: true });
+                
+                build.stdout.on('data', (data) => sendLog(data.toString()));
+                build.stderr.on('data', (data) => sendLog(data.toString())); // warnings often come in stderr
+
+                build.on('close', (buildCode) => {
+                    if (buildCode !== 0) {
+                        sendLog(`npm run build failed with code ${buildCode}`, true);
+                        return resolve({ success: false, error: 'Build failed' });
+                    }
+                    
+                    sendLog('Build command finished successfully!');
+                    resolve({ success: true });
+                });
+            });
+        });
+    });
 });
 
 // --- GENERATORS ---
