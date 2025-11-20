@@ -5,8 +5,6 @@ const viewEditor = document.getElementById('view-editor');
 const projectListEl = document.getElementById('projectList');
 
 // Modals & Overlays
-const buildOverlay = document.getElementById('build-overlay');
-const overlayLog = document.getElementById('overlay-log');
 const successModal = document.getElementById('successModal');
 const btnOpenDist = document.getElementById('btnOpenDist');
 const btnCloseSuccess = document.getElementById('btnCloseSuccess');
@@ -50,11 +48,6 @@ function log(msg, type = 'info') {
     div.innerText = `> ${msg}`;
     consoleOutput.appendChild(div);
     consoleOutput.scrollTop = consoleOutput.scrollHeight;
-    
-    // Also update overlay log if active
-    if(buildOverlay.classList.contains('active')) {
-        overlayLog.innerText = msg;
-    }
 }
 
 // --- PROJECT MANAGER ---
@@ -83,7 +76,7 @@ async function renderProjectList() {
             </div>
             <div style="display:flex; gap:10px; align-items:center;">
                  <button class="btn-delete-project" title="Remove from List" onclick="deleteProject(event, ${p.id})">
-                    <i class="fa-solid fa-trash-alt"></i>
+                    <i class="fa-solid fa-trash"></i>
                  </button>
             </div>
         `;
@@ -255,8 +248,12 @@ function populateForm(c) {
     if(c.phpExtensions) selectedExtensions = new Set(c.phpExtensions);
     renderExtensions();
     
+    // Tray / System
     document.getElementById('trayIcon').checked = c.trayIcon;
     document.getElementById('minimizeToTray').checked = c.minimizeToTray;
+    document.getElementById('closeToTray').checked = c.closeToTray || false;
+    document.getElementById('showTaskbar').checked = c.showTaskbar !== false; // default true
+    
     document.getElementById('singleInstance').checked = c.singleInstance;
     document.getElementById('runBackground').checked = c.runBackground;
     document.getElementById('contextMenu').checked = c.contextMenu;
@@ -302,8 +299,12 @@ function getAppConfig() {
         phpUpload: document.getElementById('phpUpload').value,
         phpTime: document.getElementById('phpTime').value,
         phpExtensions: [...selectedExtensions, ...extraExt],
+        
         trayIcon: document.getElementById('trayIcon').checked,
         minimizeToTray: document.getElementById('minimizeToTray').checked,
+        closeToTray: document.getElementById('closeToTray').checked,
+        showTaskbar: document.getElementById('showTaskbar').checked,
+        
         singleInstance: document.getElementById('singleInstance').checked,
         runBackground: document.getElementById('runBackground').checked,
         contextMenu: document.getElementById('contextMenu').checked,
@@ -320,14 +321,16 @@ function getAppConfig() {
 
 // --- BUILD PROCESS ---
 
-document.getElementById('btnBuildFull').onclick = async () => {
+const btnBuild = document.getElementById('btnBuildFull');
+
+btnBuild.onclick = async () => {
     const config = getAppConfig();
     if(!config) return;
     
     await saveCurrentConfig();
     
-    // 1. ACTIVATE ANIMATION
-    buildOverlay.classList.add('active');
+    // 1. ACTIVATE ANIMATION (INTERNAL)
+    btnBuild.classList.add('loading');
     
     try {
         log('Initializing Build Sequence...');
@@ -341,7 +344,7 @@ document.getElementById('btnBuildFull').onclick = async () => {
         const buildRes = await window.api.buildApp(config.sourcePath);
         
         // 2. DEACTIVATE ANIMATION
-        buildOverlay.classList.remove('active');
+        btnBuild.classList.remove('loading');
         
         if(buildRes.success) {
             successModal.classList.add('active');
@@ -351,7 +354,7 @@ document.getElementById('btnBuildFull').onclick = async () => {
             alert('Build Failed. Check log.');
         }
     } catch (e) {
-        buildOverlay.classList.remove('active');
+        btnBuild.classList.remove('loading');
         alert('Error: ' + e.message);
         log(e.message, 'error');
     }
@@ -373,10 +376,10 @@ async function checkNode() {
 }
 
 document.getElementById('btnInstallNode').onclick = async () => {
-    buildOverlay.classList.add('active');
-    overlayLog.innerText = "Downloading Node.js Runtime...";
+    const btn = document.getElementById('btnInstallNode');
+    btn.innerText = "Downloading...";
     await window.api.installNode();
-    buildOverlay.classList.remove('active');
+    btn.innerText = "Install Engine";
     checkNode();
 };
 
@@ -393,20 +396,15 @@ document.getElementById('btnSelectIcon').onclick = async () => {
 // PHP Download
 document.getElementById('btnDownloadPhp').onclick = async () => {
     const ver = document.getElementById('phpVersionSelect').value;
-    buildOverlay.classList.add('active');
-    overlayLog.innerText = `Downloading PHP ${ver}...`;
+    const btn = document.getElementById('btnDownloadPhp');
+    const originalHtml = btn.innerHTML;
     
-    // Setup listener for download progress to update overlay text
-    const progressHandler = (data) => {
-        overlayLog.innerText = `${data.status} (${Math.round(data.percent)}%)`;
-    };
-    // Note: In real implementation, ensure listener is removed to avoid duplicates
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
     
     const res = await window.api.downloadPhp(ver);
-    buildOverlay.classList.remove('active');
+    btn.innerHTML = originalHtml;
     
     if(res.success) {
-        // update cache
         phpCache = await window.api.getPhpCache();
         document.getElementById('phpPath').value = res.path;
     } else {
@@ -418,8 +416,6 @@ document.getElementById('btnDownloadPhp').onclick = async () => {
 window.api.onDownloadProgress((data) => {
     if(data.type === 'build-log') {
         log(data.msg, data.error ? 'error' : 'info');
-    } else if (buildOverlay.classList.contains('active')) {
-        overlayLog.innerText = `${data.status} ${Math.round(data.percent)}%`;
     }
 });
 

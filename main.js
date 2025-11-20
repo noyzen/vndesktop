@@ -568,7 +568,6 @@ ipcMain.handle('build-app', async (event, sourceRoot) => {
             return resolve({ success: false, error: 'vnbuild not found. Generate config first.' });
         }
 
-        // Determine Environment (Local Node or Global)
         const buildEnv = getBuildEnv();
         const localPath = getLocalNodePath();
         
@@ -605,41 +604,46 @@ ipcMain.handle('build-app', async (event, sourceRoot) => {
                         return resolve({ success: false, error: 'Build failed' });
                     }
 
-                    // --- CLEANUP DIST FOLDER ---
-                    try {
-                        sendLog('Cleaning up output artifacts...');
-                        const configFile = path.join(buildDir, 'visualneo.json');
-                        const distPath = path.join(buildDir, 'dist');
-                        const junkExtensions = ['.yml', '.yaml', '.blockmap'];
-                        let config = {};
-                        
-                        if (fs.existsSync(configFile)) {
-                            config = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+                    // --- CLEANUP DIST FOLDER ROBUSTNESS ---
+                    setTimeout(() => {
+                        try {
+                            sendLog('Cleaning up output artifacts...');
+                            const configFile = path.join(buildDir, 'visualneo.json');
+                            const distPath = path.join(buildDir, 'dist');
+                            const junkExtensions = ['.yml', '.yaml', '.blockmap'];
+                            let config = {};
+                            
+                            if (fs.existsSync(configFile)) config = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+
+                            if (fs.existsSync(distPath)) {
+                                const files = fs.readdirSync(distPath);
+                                files.forEach(f => {
+                                    const fullPath = path.join(distPath, f);
+                                    
+                                    // 1. Remove Debug/Update metadata files
+                                    if (junkExtensions.some(ext => f.endsWith(ext))) {
+                                        try { fs.rmSync(fullPath, { force: true }); } catch(e) {}
+                                    }
+
+                                    // 2. Remove unpacked folder if not requested
+                                    if (f === 'win-unpacked' && !config.targetUnpacked) {
+                                        try {
+                                            // Retry logic for locked files
+                                            fs.rmSync(fullPath, { recursive: true, force: true });
+                                        } catch (e) {
+                                            sendLog('Warning: Could not fully remove unpacked folder (File Locked).', false);
+                                        }
+                                    }
+                                });
+                            }
+                            
+                            sendLog('Build Success!');
+                            resolve({ success: true });
+                        } catch(e) {
+                            sendLog('Cleanup warning: ' + e.message, false);
+                            resolve({ success: true }); // Still count as success
                         }
-
-                        if (fs.existsSync(distPath)) {
-                            const files = fs.readdirSync(distPath);
-                            files.forEach(f => {
-                                const fullPath = path.join(distPath, f);
-                                
-                                // 1. Remove Debug/Update metadata files
-                                if (junkExtensions.some(ext => f.endsWith(ext))) {
-                                    fs.rmSync(fullPath, { force: true });
-                                }
-
-                                // 2. Remove unpacked folder if not requested
-                                if (f === 'win-unpacked' && !config.targetUnpacked) {
-                                    fs.rmSync(fullPath, { recursive: true, force: true });
-                                }
-                            });
-                        }
-                    } catch(e) {
-                        sendLog('Cleanup warning: ' + e.message, false);
-                    }
-                    // ---------------------------
-
-                    sendLog('Build Success!');
-                    resolve({ success: true });
+                    }, 2000); // Wait 2s for handles to release
                 });
             });
         });
@@ -655,21 +659,30 @@ function generatePackageJson(c) {
   if (c.targetUnpacked) targets.push("dir");
 
   // Extra Resources Logic
-  // We need to bundle PHP and WWW into resources so they can be extracted in Writable mode
   const extraResources = [];
   
   if (c.enablePhp) {
-      // Move PHP to resources/php
+      // PHP *MUST* be in extraResources to run (cannot run from ASAR)
+      // We put it in a folder named "php" next to the executable
       extraResources.push({ "from": "bin/php", "to": "php", "filter": ["**/*"] });
+  }
+  
+  // We also include WWW in extraResources IF we are using PHP, because PHP
+  // cannot read files inside ASAR.
+  // If using just Electron (no PHP), we keep WWW inside ASAR for security/speed.
+  if (c.enablePhp) {
+      extraResources.push({ "from": "www", "to": "www_source", "filter": ["**/*"] });
   }
 
   const buildConfig = {
     appId: `com.visualneo.${c.appName.replace(/\s+/g, '').toLowerCase()}`,
     productName: c.productName,
-    files: ["main.js", "www/**/*"], // 'www' inside app.asar (or app folder if asar:false)
+    // If PHP is enabled, we don't bundle www inside ASAR (we use extraResources)
+    // If PHP disabled, we bundle www inside main.js/asar
+    files: c.enablePhp ? ["main.js"] : ["main.js", "www/**/*"], 
     extraResources: extraResources,
     directories: { "output": "dist" },
-    asar: true, // Use ASAR for better performance, we will extract resources manually
+    asar: true,
     win: { target: targets, icon: c.iconPath ? path.basename(c.iconPath) : undefined },
     nsis: { oneClick: false, allowToChangeInstallationDirectory: true, createDesktopShortcut: true }
   };
@@ -690,8 +703,7 @@ function generatePackageJson(c) {
 }
 
 function generateMainJs(c) {
-  // Robust Template with Dynamic Ports and Isolation
-  return `const { app, BrowserWindow, Tray, Menu, ipcMain, shell } = require('electron');
+  return `const { app, BrowserWindow, Tray, Menu, ipcMain, shell, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
@@ -704,257 +716,178 @@ const CONFIG = {
   saveState: ${c.saveState},
   tray: ${c.trayIcon},
   minToTray: ${c.minimizeToTray},
+  closeToTray: ${c.closeToTray},
   runBg: ${c.runBackground},
   singleInstance: ${c.singleInstance},
   kiosk: ${c.kiosk},
   contextMenu: ${c.contextMenu},
   nativeFrame: ${c.nativeFrame},
-  dataMode: "${c.dataMode || 'static'}" // 'static' (temp) or 'writable' (appdata)
+  showTaskbar: ${c.showTaskbar},
+  dataMode: "${c.dataMode || 'static'}"
 };
 
 let mainWindow, tray = null, isQuitting = false, phpProcess = null, serverUrl = null;
 
 // --- PATH RESOLUTION ---
-
-// In production, resources are in process.resourcesPath. In Dev, they are relative to main.js
 const isDev = !app.isPackaged;
-const resourcesPath = isDev ? path.join(__dirname, 'bin') : process.resourcesPath;
 const appDataDir = app.getPath('userData');
 const tempDir = app.getPath('temp');
+const instanceId = 'vneo-' + Date.now();
 
-// Unique ID for this instance (used for temp isolation)
-const instanceId = 'vneo-' + Date.now() + '-' + Math.floor(Math.random() * 1000);
+// Resource Paths
+// In Prod: 'resources' folder is beside the exe.
+// In Dev: 'bin' folder is relative.
+const resourcesDir = isDev ? path.join(__dirname, 'bin') : process.resourcesPath;
 
-// --- STATE MANAGEMENT ---
-const statePath = path.join(appDataDir, 'window-state.json');
-
-function loadState() {
-  try { return JSON.parse(fs.readFileSync(statePath, 'utf8')); } 
-  catch (e) { return { width: ${c.width}, height: ${c.height} }; }
-}
-
-function saveState() {
-  if (!mainWindow) return;
-  const bounds = mainWindow.getBounds();
-  const isMaximized = mainWindow.isMaximized();
-  fs.writeFileSync(statePath, JSON.stringify({ ...bounds, isMaximized }));
-}
-
-// --- FILE SYSTEM HELPERS ---
-
+// --- HELPERS ---
 function syncDir(src, dest) {
   if (!fs.existsSync(src)) return;
   if (!fs.existsSync(dest)) fs.mkdirSync(dest, { recursive: true });
-  
   const entries = fs.readdirSync(src);
   entries.forEach(entry => {
       const srcPath = path.join(src, entry);
       const destPath = path.join(dest, entry);
       const stat = fs.statSync(srcPath);
-      
-      if (stat.isDirectory()) {
-          syncDir(srcPath, destPath);
-      } else {
-          // In Writable mode, we only overwrite if version changed or file missing
-          // But for simplicity and updates, we usually overwrite core files.
-          // For database/config files that user modifies, they should be in specific ignored paths 
-          // or handled by app logic. Here we overwrite to ensure app update works.
-          try {
-             fs.copyFileSync(srcPath, destPath);
-          } catch(e) {
-             // Ignore busy file errors
-          }
-      }
+      if (stat.isDirectory()) syncDir(srcPath, destPath);
+      else try { fs.copyFileSync(srcPath, destPath); } catch(e) {}
   });
 }
 
-// --- RUNTIME ENVIRONMENT SETUP ---
+// --- STATE ---
+const statePath = path.join(appDataDir, 'window-state.json');
+function loadState() {
+  try { return JSON.parse(fs.readFileSync(statePath, 'utf8')); } 
+  catch (e) { return { width: ${c.width}, height: ${c.height} }; }
+}
+function saveState() {
+  if (!mainWindow) return;
+  const bounds = mainWindow.getBounds();
+  fs.writeFileSync(statePath, JSON.stringify({ ...bounds, isMaximized: mainWindow.isMaximized() }));
+}
 
+// --- RUNTIME SETUP ---
 async function setupEnvironment() {
-    const internalPhp = isDev ? path.join(__dirname, 'bin', 'php') : path.join(process.resourcesPath, 'php');
-    // In standard Electron (ASAR=true), www is inside app.asar. 
-    // To serve via PHP, we MUST extract it to the file system.
-    const internalWww = path.join(__dirname, 'www'); 
+    // If PHP is NOT used, we serve static files from internal ASAR or file protocol.
+    if (!CONFIG.usePhp) return { docRoot: null, phpDir: null };
 
+    // If PHP IS used, we MUST extract files because PHP.exe cannot read inside app.asar.
     let runtimeRoot;
-
     if (CONFIG.dataMode === 'writable') {
-        // Writable: Use AppData/Roaming. Shared between runs. Persistent.
         runtimeRoot = path.join(appDataDir, 'server_root');
     } else {
-        // Static: Use Temp Folder. Unique per session? 
-        // To support multiple instances perfectly without locking, we use a unique temp folder.
         runtimeRoot = path.join(tempDir, CONFIG.title.replace(/\\W/g,''), instanceId);
     }
 
-    // Version Check (Only for Writable mode optimization)
-    const versionFile = path.join(runtimeRoot, 'version.txt');
-    const currentAppVersion = '${c.version}';
-    let needsUpdate = true;
+    // 1. Locate PHP (Must be in resources/php)
+    const phpSource = path.join(resourcesDir, 'php');
+    
+    // 2. Locate WWW Source
+    // In Dev: __dirname/www
+    // In Prod: resources/www_source (because we put it in extraResources in package.json)
+    const wwwSource = isDev ? path.join(__dirname, 'www') : path.join(resourcesDir, 'www_source');
 
-    if (CONFIG.dataMode === 'writable' && fs.existsSync(versionFile)) {
-       const installedVer = fs.readFileSync(versionFile, 'utf8');
-       if (installedVer === currentAppVersion) needsUpdate = false;
+    if (!fs.existsSync(phpSource)) throw new Error("PHP Runtime missing in resources.");
+
+    // Extract/Update files
+    try {
+        syncDir(wwwSource, runtimeRoot);
+        // Copy PHP config only if needed, usually we point PHP to the resources binary directly
+        // But to allow php.ini edits at runtime, we could copy it. 
+        // For now, we run PHP directly from resources to save time/space, 
+        // BUT we set the docRoot to the extracted WWW.
+    } catch (e) {
+        console.error("Setup Error", e);
     }
 
-    if (needsUpdate || CONFIG.dataMode !== 'writable') {
-        // Determine extraction source for WWW
-        // If ASAR is used, fs.copyFileSync works transparently for reading from ASAR.
-        try {
-            syncDir(internalWww, runtimeRoot);
-            
-            // Extract PHP if needed
-            if (CONFIG.usePhp) {
-                const phpDest = path.join(runtimeRoot, 'php');
-                syncDir(internalPhp, phpDest);
-            }
-            
-            if (CONFIG.dataMode === 'writable') fs.writeFileSync(versionFile, currentAppVersion);
-        } catch (e) {
-            console.error("Environment Setup Error:", e);
-        }
-    }
-
-    return {
-        docRoot: runtimeRoot,
-        phpDir: path.join(runtimeRoot, 'php')
-    };
+    return { docRoot: runtimeRoot, phpDir: phpSource };
 }
 
-// --- PHP SERVER MANAGER ---
-
 async function startPhpServer() {
+  if (!CONFIG.usePhp) return;
+  
   return new Promise(async (resolve, reject) => {
-    if (!CONFIG.usePhp) { serverUrl = null; return resolve(null); }
-
     try {
       const env = await setupEnvironment();
       const phpExe = path.join(env.phpDir, 'php.exe');
       const phpIni = path.join(env.phpDir, 'php.ini');
 
-      if (!fs.existsSync(phpExe)) return reject(new Error("PHP Binary not found"));
+      if (!fs.existsSync(phpExe)) return reject(new Error("PHP.exe not found at: " + phpExe));
 
-      // ROBUSTNESS: Use Port 0 to let OS assign a free random port.
-      // This prevents conflicts with existing web servers or other instances.
+      // Spawn PHP on Port 0
       phpProcess = spawn(phpExe, ['-S', '127.0.0.1:0', '-t', env.docRoot, '-c', phpIni], {
         cwd: env.docRoot,
         windowsHide: true
       });
 
-      // Capture Port from stderr/stdout
       let portFound = false;
-      
       const checkOutput = (data) => {
           const str = data.toString();
-          // Regex to find "Listening on http://127.0.0.1:XXXX"
           const match = str.match(/Listening on http:\\/\\/127\\.0\\.0\\.1:(\\d+)/);
           if (match && !portFound) {
               portFound = true;
-              const port = match[1];
-              serverUrl = \`http://127.0.0.1:\${port}/\`;
+              serverUrl = \`http://127.0.0.1:\${match[1]}/\`;
               resolve(serverUrl);
           }
       };
 
       phpProcess.stdout.on('data', checkOutput);
       phpProcess.stderr.on('data', checkOutput);
+      phpProcess.on('error', (err) => reject(err));
+      phpProcess.on('close', (code) => { if(!portFound) reject(new Error("PHP Exited with code " + code)); });
 
-      phpProcess.on('error', (err) => {
-          reject(err);
-      });
-      
-      phpProcess.on('close', () => {
-          // If closed unexpectedly before port found
-          if (!portFound) reject(new Error("PHP exited immediately"));
-      });
-
-    } catch (e) {
-      reject(e);
-    }
+    } catch (e) { reject(e); }
   });
 }
 
 function killPhp() {
   if (phpProcess) {
-    // Windows robust kill
     spawn("taskkill", ["/pid", phpProcess.pid, '/f', '/t']);
     phpProcess = null;
   }
-  
-  // Cleanup Temp files if Static Mode
-  if (CONFIG.dataMode !== 'writable') {
-     try {
-        const envPath = path.join(tempDir, CONFIG.title.replace(/\\W/g,''), instanceId);
-        // We can't delete immediately if file locked, but we try.
-        // fs.rmSync(envPath, { recursive: true, force: true }); 
-        // Doing this on exit is risky in Electron. OS cleans temp eventually.
-     } catch(e) {}
-  }
 }
-
-// --- UI & APP LIFECYCLE ---
 
 function createWindow() {
   const state = CONFIG.saveState ? loadState() : { width: ${c.width}, height: ${c.height} };
+  
   const winConfig = {
     width: state.width, height: state.height, x: state.x, y: state.y,
     minWidth: ${c.minWidth || 0}, minHeight: ${c.minHeight || 0},
     resizable: ${c.resizable}, fullscreenable: ${c.fullscreenable},
     kiosk: CONFIG.kiosk, frame: CONFIG.nativeFrame, center: ${c.center},
     autoHideMenuBar: true, show: false,
+    skipTaskbar: !CONFIG.showTaskbar,
     backgroundColor: '#121212',
     webPreferences: { nodeIntegration: false, contextIsolation: true, devTools: ${c.devTools} }
   };
-  
+
   ${c.iconPath ? `winConfig.icon = path.join(__dirname, '${path.basename(c.iconPath)}');` : ''}
 
   mainWindow = new BrowserWindow(winConfig);
   mainWindow.setMenu(null);
-
   if (CONFIG.saveState && state.isMaximized) mainWindow.maximize();
 
   if (CONFIG.usePhp && serverUrl) {
     mainWindow.loadURL(serverUrl + CONFIG.entry);
-  } else if (CONFIG.entry.startsWith('http')) {
-    mainWindow.loadURL(CONFIG.entry);
   } else {
-    // Fallback for static mode without PHP, load from temp/generated folder
-    // or if Writable, from AppData
-    if (CONFIG.usePhp === false) {
-         // If no PHP, we still need to serve files.
-         // Simple Electron File Protocol
-         // For generated static apps, files are in resources/app/www
-         // But if we use 'writable', they are in AppData.
-         
-         let finalPath = path.join(__dirname, 'www', CONFIG.entry);
-         // Check if we extracted?
-         if (CONFIG.dataMode === 'writable') {
-            finalPath = path.join(appDataDir, 'server_root', CONFIG.entry);
-         }
-         mainWindow.loadFile(finalPath);
-    }
+    // Static Mode (Internal ASAR)
+    mainWindow.loadFile(path.join(__dirname, 'www', CONFIG.entry));
   }
-
-  ${c.userAgent ? `mainWindow.webContents.setUserAgent("${c.userAgent}");` : ''}
-
-  mainWindow.once('ready-to-show', () => mainWindow.show());
   
+  ${c.userAgent ? `mainWindow.webContents.setUserAgent("${c.userAgent}");` : ''}
+  mainWindow.once('ready-to-show', () => mainWindow.show());
+
   mainWindow.on('close', (e) => {
     if (CONFIG.saveState) saveState();
-    if (CONFIG.minToTray && tray && !isQuitting) {
+    // Close to Tray Logic
+    if ((CONFIG.minToTray || CONFIG.closeToTray) && tray && !isQuitting) {
       e.preventDefault();
       mainWindow.hide();
     }
   });
-
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
-    return { action: 'deny' };
-  });
   
   if (CONFIG.contextMenu) {
       mainWindow.webContents.on('context-menu', () => {
-        Menu.buildFromTemplate([{ label: 'Copy', role: 'copy' }, { label: 'Paste', role: 'paste' }, { type: 'separator' }, { label: 'Reload', role: 'reload' }]).popup();
+        Menu.buildFromTemplate([{ role: 'copy' }, { role: 'paste' }, { type: 'separator' }, { role: 'reload' }]).popup();
       });
   }
 }
@@ -962,7 +895,6 @@ function createWindow() {
 function createTray() {
   if (!CONFIG.tray) return;
   let iconPath = path.join(__dirname, ${c.iconPath ? `'${path.basename(c.iconPath)}'` : `'appicon.png'`});
-  // Handle packed path
   if (process.resourcesPath && !fs.existsSync(iconPath)) {
      iconPath = path.join(process.resourcesPath, ${c.iconPath ? `'${path.basename(c.iconPath)}'` : `'appicon.png'`});
   }
@@ -971,29 +903,27 @@ function createTray() {
      tray = new Tray(iconPath);
      tray.setToolTip(CONFIG.title);
      tray.setContextMenu(Menu.buildFromTemplate([
-       { label: 'Show', click: () => mainWindow.show() },
+       { label: 'Open', click: () => mainWindow.show() },
        { label: 'Exit', click: () => { isQuitting = true; app.quit(); } }
      ]));
      tray.on('click', () => mainWindow.isVisible() ? mainWindow.hide() : mainWindow.show());
   } catch (e) {}
 }
 
-// Single Instance Lock
 const gotLock = CONFIG.singleInstance ? app.requestSingleInstanceLock() : true;
-if (!gotLock) {
-  app.quit();
-} else {
-  app.on('second-instance', () => {
-    if (mainWindow) {
-       if (mainWindow.isMinimized()) mainWindow.restore();
-       mainWindow.focus();
-    }
-  });
+if (!gotLock) { app.quit(); } 
+else {
+  app.on('second-instance', () => { if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.focus(); } });
   
   app.whenReady().then(async () => {
-    await startPhpServer();
-    createWindow();
-    createTray();
+    try {
+        await startPhpServer();
+        createWindow();
+        createTray();
+    } catch(e) {
+        dialog.showErrorBox("Startup Error", e.message);
+        app.quit();
+    }
   });
   
   app.on('window-all-closed', () => { if (CONFIG.runBg && !isQuitting) {} else if (process.platform !== 'darwin') app.quit(); });

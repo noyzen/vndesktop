@@ -28,8 +28,6 @@
         --border-hover: rgba(255, 255, 255, 0.2);
         
         --glass: blur(10px);
-        --shadow-sm: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
-        --shadow-lg: 0 20px 25px -5px rgba(0, 0, 0, 0.5);
       }
 
       /* Global Reset */
@@ -272,26 +270,35 @@
       .pm-btn-new:hover { border-color: var(--primary); color: var(--primary); background: rgba(59, 130, 246, 0.05); transform: none; }
 
       .btn-delete-project {
-        background: rgba(239, 68, 68, 0.1);
+        background: rgba(239, 68, 68, 0.15);
         color: #ef4444;
         border: 1px solid rgba(239, 68, 68, 0.2);
-        width: 40px;
-        height: 40px;
+        width: 45px;
+        height: 45px;
         padding: 0;
-        border-radius: 10px;
+        border-radius: 12px;
         display: flex;
         align-items: center;
         justify-content: center;
         transition: all 0.2s;
-        opacity: 0.7;
+        cursor: pointer;
+        z-index: 5;
       }
+      
+      .btn-delete-project i {
+        font-size: 18px;
+        color: #ef4444; 
+      }
+      
       .btn-delete-project:hover {
         background: #ef4444;
-        color: white;
+        border-color: #ef4444;
         box-shadow: 0 0 15px rgba(239, 68, 68, 0.5);
-        border-color: transparent;
-        opacity: 1;
         transform: scale(1.1);
+      }
+      
+      .btn-delete-project:hover i {
+          color: white;
       }
 
       /* --- EDITOR VIEW --- */
@@ -413,13 +420,37 @@
         position: relative;
         overflow: hidden;
         border: 1px solid rgba(255,255,255,0.1);
+        min-height: 65px;
+        transition: all 0.3s;
       }
-      .build-cta::after {
-        content: ''; position: absolute; top: 0; left: -100%; width: 100%; height: 100%;
-        background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
-        animation: shine 3s infinite;
+      
+      .build-cta i { font-size: 1.2rem; margin-right: 10px; }
+      
+      .build-cta.loading {
+        cursor: wait;
+        background: #1a1a20;
+        border-color: var(--primary);
+        color: var(--text-muted);
       }
-      @keyframes shine { 20% { left: 100%; } 100% { left: 100%; } }
+      
+      .build-cta.loading span { display: none; }
+      .build-cta.loading i { display: none; }
+      
+      .build-cta.loading::after {
+        content: '';
+        position: absolute;
+        top: 50%; left: 50%;
+        width: 24px; height: 24px;
+        margin: -14px 0 0 -14px;
+        border: 3px solid transparent;
+        border-top-color: var(--primary);
+        border-right-color: var(--accent);
+        border-radius: 50%;
+        animation: button-spin 0.8s linear infinite;
+        display: block;
+      }
+      
+      @keyframes button-spin { to { transform: rotate(360deg); } }
 
       /* Console */
       .console {
@@ -431,65 +462,12 @@
         font-size: 0.8rem;
         color: #ccc;
         overflow-y: auto;
+        margin-top: 20px;
+        border-radius: 8px;
       }
-      .log-info { color: #60a5fa; }
-      .log-success { color: #4ade80; }
-      .log-error { color: #f87171; }
-
-      /* --- HYPERDRIVE OVERLAY ANIMATION --- */
-      #build-overlay {
-        position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-        background: rgba(0,0,0,0.9);
-        backdrop-filter: blur(20px);
-        z-index: 9999;
-        display: none;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-      }
-      
-      #build-overlay.active { display: flex; animation: fadeIn 0.3s; }
-
-      .cyber-loader {
-        width: 200px; height: 200px;
-        position: relative;
-        transform-style: preserve-3d;
-        perspective: 1000px;
-      }
-
-      .ring {
-        position: absolute;
-        border-radius: 50%;
-        border: 2px solid transparent;
-        border-top-color: var(--primary);
-        border-bottom-color: var(--accent);
-        animation: spin var(--duration) linear infinite;
-      }
-      
-      .ring:nth-child(1) { width: 100%; height: 100%; top: 0; left: 0; --duration: 2s; border-width: 4px; box-shadow: 0 0 20px var(--primary); }
-      .ring:nth-child(2) { width: 80%; height: 80%; top: 10%; left: 10%; --duration: 3s; border-width: 2px; border-left-color: white; animation-direction: reverse; }
-      .ring:nth-child(3) { width: 60%; height: 60%; top: 20%; left: 20%; --duration: 1.5s; border-width: 5px; border-right-color: var(--primary); }
-
-      @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-
-      .build-status-text {
-        margin-top: 40px;
-        font-family: 'Consolas', monospace;
-        color: var(--primary);
-        font-size: 1.4rem;
-        text-transform: uppercase;
-        letter-spacing: 4px;
-        animation: blink 1s infinite;
-        text-shadow: 0 0 20px var(--primary);
-      }
-      
-      .build-detail-text {
-        margin-top: 10px;
-        color: #888;
-        font-size: 0.9rem;
-      }
-
-      @keyframes blink { 50% { opacity: 0.5; } }
+      .log-info { color: #60a5fa; margin-bottom: 4px; }
+      .log-success { color: #4ade80; margin-bottom: 4px; }
+      .log-error { color: #f87171; margin-bottom: 4px; }
 
       /* Success Modal */
       .modal-glass {
@@ -517,17 +495,6 @@
     </style>
 </head>
 <body>
-
-    <!-- HYPERDRIVE BUILD OVERLAY -->
-    <div id="build-overlay">
-        <div class="cyber-loader">
-            <div class="ring"></div>
-            <div class="ring"></div>
-            <div class="ring"></div>
-        </div>
-        <div class="build-status-text">System Compiling</div>
-        <div class="build-detail-text" id="overlay-log">Optimizing Assets...</div>
-    </div>
 
     <!-- SUCCESS MODAL -->
     <div id="successModal" class="modal-glass">
@@ -696,14 +663,19 @@
                 <div class="checkbox-grid">
                     <label class="checkbox-card"><input type="checkbox" id="trayIcon" checked><span class="custom-check"></span><span>Tray Icon</span></label>
                     <label class="checkbox-card"><input type="checkbox" id="minimizeToTray" checked><span class="custom-check"></span><span>Minimize to Tray</span></label>
+                    <label class="checkbox-card"><input type="checkbox" id="closeToTray"><span class="custom-check"></span><span>Close to Tray</span></label>
                     <label class="checkbox-card"><input type="checkbox" id="singleInstance" checked><span class="custom-check"></span><span>Single Instance</span></label>
                     <label class="checkbox-card"><input type="checkbox" id="runBackground"><span class="custom-check"></span><span>Run in Background</span></label>
+                    <label class="checkbox-card"><input type="checkbox" id="showTaskbar" checked><span class="custom-check"></span><span>Show in Taskbar</span></label>
+                </div>
+
+                <div class="section-title">Advanced</div>
+                <div class="checkbox-grid">
                     <label class="checkbox-card"><input type="checkbox" id="contextMenu"><span class="custom-check"></span><span>Context Menu</span></label>
                     <label class="checkbox-card"><input type="checkbox" id="devTools"><span class="custom-check"></span><span>DevTools (F12)</span></label>
                 </div>
-
-                <div class="section-title">Browser</div>
-                <div class="form-group">
+                
+                <div class="form-group" style="margin-top:20px;">
                     <label>User Agent</label>
                     <input type="text" id="userAgent" placeholder="Default Electron User Agent">
                 </div>
@@ -749,7 +721,8 @@
                 </div>
 
                 <button class="build-cta" id="btnBuildFull">
-                    <i class="fa-solid fa-bolt"></i> Compile Application
+                    <span>Compile Application</span>
+                    <i class="fa-solid fa-bolt"></i>
                 </button>
             </div>
 
