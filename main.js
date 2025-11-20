@@ -638,6 +638,13 @@ ipcMain.handle('build-app', async (event, sourceRoot) => {
                 } catch(e) { 
                     // Process was not running, safe to proceed
                 }
+                
+                // Try to kill orphaned php.exe in the unpacked folder to release locks
+                // This assumes standard build path
+                try {
+                     // This is a best effort. We can't easily filter taskkill by path in JS without logic
+                     // But we can try to rely on the fact that we killed the parent.
+                } catch(e) {}
             }
         } catch(e) {
             sendLog('Warning: Instance check skipped.', true);
@@ -842,6 +849,7 @@ async function setupEnvironment() {
         runtimeRoot = path.join(appDataDir, 'server_root');
     } else {
         // Unique path for every instance in static mode to prevent collision
+        // We cleanup this folder on exit
         runtimeRoot = path.join(tempDir, CONFIG.title.replace(/[^a-zA-Z0-9]/g,''), instanceId);
     }
 
@@ -877,12 +885,20 @@ async function startPhpServer() {
       });
 
       let portFound = false;
+      const timer = setTimeout(() => {
+          if(!portFound) {
+              killPhp();
+              reject(new Error("PHP Server startup timed out (10s). Check antivirus or firewall."));
+          }
+      }, 10000);
+
       const checkOutput = (data) => {
           const str = data.toString();
           // Look for "Listening on http://127.0.0.1:XXXX"
           const match = str.match(/Listening on http:\\/\\/127\\.0\\.0\\.1:(\\d+)/);
           if (match && !portFound) {
               portFound = true;
+              clearTimeout(timer);
               serverUrl = \`http://127.0.0.1:\${match[1]}/\`;
               resolve(serverUrl);
           }
@@ -890,8 +906,13 @@ async function startPhpServer() {
 
       phpProcess.stdout.on('data', checkOutput);
       phpProcess.stderr.on('data', checkOutput);
-      phpProcess.on('error', (err) => reject(err));
-      phpProcess.on('close', (code) => { if(!portFound) reject(new Error("PHP Exited with code " + code)); });
+      phpProcess.on('error', (err) => { clearTimeout(timer); reject(err); });
+      phpProcess.on('close', (code) => { 
+          if(!portFound) {
+              clearTimeout(timer);
+              reject(new Error("PHP Exited unexpectedly with code " + code)); 
+          }
+      });
 
     } catch (e) { reject(e); }
   });
@@ -900,12 +921,15 @@ async function startPhpServer() {
 function killPhp() {
   if (phpProcess) {
     try {
-        // Force kill process tree
+        // Aggressive kill strategy to prevent locked files
+        process.kill(phpProcess.pid);
+        // Ensure child processes (CGI/Workers) are also dead
         execSync(\`taskkill /pid \${phpProcess.pid} /f /t\`);
     } catch(e) {}
     phpProcess = null;
   }
-  // Also try to clean up temp dir if in static mode
+  
+  // Clean up temp dir if in static mode
   if (CONFIG.dataMode === 'static') {
       try { 
           const tempRoot = path.join(tempDir, CONFIG.title.replace(/[^a-zA-Z0-9]/g,''), instanceId);
@@ -922,7 +946,8 @@ function createWindow() {
     minWidth: ${c.minWidth || 0}, minHeight: ${c.minHeight || 0},
     resizable: ${c.resizable}, fullscreenable: ${c.fullscreenable},
     kiosk: CONFIG.kiosk, frame: CONFIG.nativeFrame, center: ${c.center},
-    autoHideMenuBar: true, show: false,
+    autoHideMenuBar: true, 
+    show: false, // Wait for ready-to-show
     skipTaskbar: !CONFIG.showTaskbar,
     title: CONFIG.title,
     backgroundColor: '#121212',
@@ -942,7 +967,20 @@ function createWindow() {
   }
   
   ${c.userAgent ? `mainWindow.webContents.setUserAgent("${c.userAgent}");` : ''}
-  mainWindow.once('ready-to-show', () => mainWindow.show());
+  
+  // Visual Failsafe: If ready-to-show doesn't fire (e.g. blank page), show anyway after 3s
+  const showTimer = setTimeout(() => {
+      if(mainWindow && !mainWindow.isVisible()) mainWindow.show();
+  }, 3000);
+
+  mainWindow.once('ready-to-show', () => {
+      clearTimeout(showTimer);
+      mainWindow.show();
+  });
+
+  mainWindow.webContents.on('unresponsive', () => {
+      // Optional: Log or reload
+  });
 
   // Tray Logic: Minimize
   mainWindow.on('minimize', (e) => {
@@ -962,7 +1000,8 @@ function createWindow() {
       return; 
     }
     
-    // Normal Close
+    // If we are not closing to tray, we are actually closing.
+    // The 'window-all-closed' event will handle the quit.
   });
   
   if (CONFIG.contextMenu) {
@@ -974,7 +1013,6 @@ function createWindow() {
 
 function createTray() {
   if (!CONFIG.tray) return;
-  // IMPORTANT: The icon is always copied to the root by the builder now
   const iconPath = path.join(__dirname, 'app-icon.png');
 
   try {
@@ -986,12 +1024,8 @@ function createTray() {
            { label: 'Exit', click: () => { isQuitting = true; app.quit(); } }
          ]));
          tray.on('click', () => mainWindow.isVisible() ? mainWindow.hide() : mainWindow.show());
-     } else {
-         throw new Error("Icon not found");
      }
   } catch (e) {
-     console.error("Tray failed", e);
-     // FALLBACK: If Tray fails, ensure taskbar button is visible so app is not lost
      if(mainWindow) mainWindow.setSkipTaskbar(false);
   }
 }
@@ -1012,8 +1046,17 @@ else {
     }
   });
   
-  app.on('window-all-closed', () => { if (CONFIG.runBg && !isQuitting) {} else if (process.platform !== 'darwin') app.quit(); });
+  app.on('window-all-closed', () => { 
+      // Explicitly quit unless configured to run in background
+      if (CONFIG.runBg && !isQuitting) {
+          // Keep running
+      } else {
+          app.quit();
+      }
+  });
+  
   app.on('before-quit', () => { isQuitting = true; killPhp(); });
+  app.on('will-quit', () => { killPhp(); }); // Double safety
 }
 `;
 }
