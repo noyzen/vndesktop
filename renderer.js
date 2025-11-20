@@ -1,4 +1,9 @@
 
+// View Management
+const viewManager = document.getElementById('view-manager');
+const viewEditor = document.getElementById('view-editor');
+const projectListEl = document.getElementById('projectList');
+
 // Navigation Logic
 const tabs = document.querySelectorAll('.nav-item');
 const contents = document.querySelectorAll('.tab-content');
@@ -7,7 +12,132 @@ const phpToggle = document.getElementById('enablePhp');
 const phpPanel = document.getElementById('phpPanel');
 const phpDisabledMsg = document.getElementById('phpDisabledMsg');
 
-// Icon map for headers
+// Project State
+let currentProjectPath = null;
+let selectedExtensions = new Set(['curl', 'gd', 'mbstring', 'sqlite3', 'openssl']);
+
+// --- PROJECT MANAGER LOGIC ---
+
+async function renderProjectList() {
+  const projects = await window.api.getProjects();
+  projectListEl.innerHTML = '';
+  
+  if(projects.length === 0) {
+      projectListEl.innerHTML = '<div style="text-align:center; color:#555; padding:30px;">No recent projects. Click "New Project" to start.</div>';
+      return;
+  }
+
+  projects.forEach((p, index) => {
+      const card = document.createElement('div');
+      card.className = 'project-card';
+      if (index === 0) card.classList.add('last-used');
+      
+      const lastUsedDate = new Date(p.lastUsed).toLocaleDateString();
+      const isLast = index === 0 ? '<span class="last-used-badge">Last Used</span>' : '';
+      
+      card.innerHTML = `
+         <div class="project-info">
+            <h3>${p.name}</h3>
+            <p>${p.path}</p>
+         </div>
+         <div class="project-meta">
+             ${isLast}
+             <span style="font-size:0.8rem; color:#666;">${lastUsedDate}</span>
+             <button class="btn-del-proj" data-id="${p.id}"><i class="fa-solid fa-times"></i></button>
+         </div>
+      `;
+      
+      // Click to open
+      card.onclick = (e) => {
+          if(e.target.closest('.btn-del-proj')) return;
+          openProject(p.path);
+      };
+      
+      // Delete
+      const delBtn = card.querySelector('.btn-del-proj');
+      delBtn.onclick = async (e) => {
+          e.stopPropagation();
+          if(confirm('Remove this project from the list? (Files will NOT be deleted)')) {
+              await window.api.removeProject(p.id);
+              renderProjectList();
+          }
+      };
+      
+      projectListEl.appendChild(card);
+  });
+}
+
+// Add New Project
+document.getElementById('btnNewProject').addEventListener('click', async () => {
+   const path = await window.api.selectFolder();
+   if(path) {
+       await window.api.addProject(path);
+       openProject(path);
+   }
+});
+
+// Switch Views
+function showEditor() {
+    viewManager.classList.add('hidden');
+    viewEditor.classList.remove('hidden');
+}
+
+function showManager() {
+    viewEditor.classList.add('hidden');
+    viewManager.classList.remove('hidden');
+    renderProjectList();
+    currentProjectPath = null;
+}
+
+// Open Project & Load Config
+async function openProject(path) {
+    currentProjectPath = path;
+    const config = await window.api.loadProjectConfig(path);
+    
+    // Reset UI to defaults
+    resetForm();
+    document.getElementById('sourcePath').value = path;
+    
+    if (config) {
+        populateForm(config);
+        log(`Loaded project config from: ${path}`, 'success');
+    } else {
+        log(`New project initialized: ${path}`, 'info');
+        // Set default name based on folder
+        document.getElementById('productName').value = path.split(/[\\/]/).pop();
+        document.getElementById('appName').value = path.split(/[\\/]/).pop().toLowerCase().replace(/\s+/g, '-');
+    }
+    
+    showEditor();
+}
+
+// Back Button
+document.getElementById('btnBackToProjects').addEventListener('click', async () => {
+    // Auto save on exit?
+    await saveCurrentConfig();
+    showManager();
+});
+
+// Save Logic
+async function saveCurrentConfig() {
+    if (!currentProjectPath) return;
+    const config = getAppConfig(); // Get current UI state
+    if (config) {
+        await window.api.saveProjectConfig(currentProjectPath, config);
+        log('Project settings saved.', 'info');
+    }
+}
+
+document.getElementById('btnQuickSave').addEventListener('click', async () => {
+    await saveCurrentConfig();
+    const btn = document.getElementById('btnQuickSave');
+    btn.innerHTML = '<i class="fa-solid fa-check"></i> Saved';
+    setTimeout(() => btn.innerHTML = '<i class="fa-solid fa-save"></i> Save Settings', 2000);
+});
+
+
+// --- EDITOR UI LOGIC ---
+
 const tabIcons = {
   'project': '<i class="fa-solid fa-folder-open"></i>',
   'window': '<i class="fa-solid fa-desktop"></i>',
@@ -30,7 +160,6 @@ tabs.forEach(tab => {
   });
 });
 
-// PHP Toggle Logic
 phpToggle.addEventListener('change', () => {
   if(phpToggle.checked) {
     phpPanel.classList.remove('hidden');
@@ -53,7 +182,6 @@ function log(msg, type = 'info') {
   if(type === 'warn') div.classList.add('log-warn');
   if(type === 'cmd') div.classList.add('log-cmd');
   
-  // strip colors if coming from raw terminal output sometimes
   const cleanMsg = msg.replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '');
   
   const time = new Date().toLocaleTimeString();
@@ -62,29 +190,17 @@ function log(msg, type = 'info') {
   consoleOutput.scrollTop = consoleOutput.scrollHeight;
 }
 
-// Console Toolbar Actions
-document.getElementById('btnClearLogs').addEventListener('click', () => {
-  consoleOutput.innerHTML = '';
-});
-
+document.getElementById('btnClearLogs').addEventListener('click', () => { consoleOutput.innerHTML = ''; });
 document.getElementById('btnCopyLogs').addEventListener('click', async () => {
-  const text = consoleOutput.innerText;
-  await window.api.copyToClipboard(text);
-  
-  const btn = document.getElementById('btnCopyLogs');
-  const originalHtml = btn.innerHTML;
-  btn.innerHTML = '<i class="fa-solid fa-check"></i> Copied';
-  setTimeout(() => btn.innerHTML = originalHtml, 2000);
+  await window.api.copyToClipboard(consoleOutput.innerText);
 });
 
-// --- PHP EXTENSION MANAGER UI ---
+// PHP Extensions
 const defaultExtensions = [
   'curl', 'fileinfo', 'gd', 'intl', 'mbstring', 'openssl', 
   'pdo_sqlite', 'sqlite3', 'mysqli', 'pdo_mysql', 'exif', 'soap'
 ];
-
 const extGrid = document.getElementById('extGrid');
-const selectedExtensions = new Set(['curl', 'gd', 'mbstring', 'sqlite3', 'openssl']);
 
 function renderExtensions() {
   extGrid.innerHTML = '';
@@ -99,28 +215,18 @@ function renderExtensions() {
 }
 
 function toggleExtension(ext) {
-  if(selectedExtensions.has(ext)) {
-    selectedExtensions.delete(ext);
-  } else {
-    selectedExtensions.add(ext);
-  }
+  if(selectedExtensions.has(ext)) selectedExtensions.delete(ext);
+  else selectedExtensions.add(ext);
   renderExtensions();
 }
 
-renderExtensions();
-
-// --- PHP CACHE & DOWNLOADER LOGIC ---
-
-// Cache for installed versions
+// --- PHP DOWNLOADER ---
 let phpCache = {};
-
 async function refreshPhpStatus() {
     try {
         phpCache = await window.api.getPhpCache();
         updatePhpUiState();
-    } catch (e) {
-        console.error("Failed to load PHP cache", e);
-    }
+    } catch (e) {}
 }
 
 const phpSelect = document.getElementById('phpVersionSelect');
@@ -128,17 +234,14 @@ const btnDownload = document.getElementById('btnDownloadPhp');
 const phpPathInput = document.getElementById('phpPath');
 const phpStatusBadge = document.getElementById('phpStatusBadge');
 
-// Update UI based on selection and cache
 function updatePhpUiState() {
     const selectedVer = phpSelect.value;
     const cached = phpCache[selectedVer];
     
-    // Update dropdown options text
     Array.from(phpSelect.options).forEach(opt => {
         const ver = opt.value;
         const originalText = opt.getAttribute('data-orig') || opt.text;
         if (!opt.hasAttribute('data-orig')) opt.setAttribute('data-orig', originalText);
-        
         if (phpCache[ver]) {
             opt.text = `✓ ${originalText} (Installed)`;
             opt.style.fontWeight = 'bold';
@@ -154,56 +257,32 @@ function updatePhpUiState() {
         phpStatusBadge.innerHTML = '<span style="color:#4ade80"><i class="fa-solid fa-check-circle"></i> Ready to use</span>';
         btnDownload.innerHTML = '<i class="fa-solid fa-rotate-right"></i> Re-Download';
         btnDownload.classList.add('secondary');
-        
-        // Auto-fill path if empty or pointing to another cache
-        if (!phpPathInput.value || phpPathInput.value.includes('php-cache')) {
-            phpPathInput.value = cached;
-        }
+        if (!phpPathInput.value || phpPathInput.value.includes('php-cache')) phpPathInput.value = cached;
     } else {
         phpStatusBadge.innerHTML = '<span style="color:#fbbf24"><i class="fa-solid fa-circle-exclamation"></i> Not installed</span>';
         btnDownload.innerHTML = '<i class="fa-solid fa-cloud-arrow-down"></i> Download & Install';
         btnDownload.classList.remove('secondary');
-        
-        // Clear path if it was auto-filled before
-        if (phpPathInput.value.includes('php-cache')) {
-            phpPathInput.value = '';
-        }
+        if (phpPathInput.value.includes('php-cache')) phpPathInput.value = '';
     }
 }
 
-// Listener for dropdown change
 phpSelect.addEventListener('change', updatePhpUiState);
-
-// Initial check on load
 refreshPhpStatus();
-
 
 if (window.api && window.api.onDownloadProgress) {
     window.api.onDownloadProgress((data) => {
         if(data.type === 'build-log') {
-             // Build log stream
-             if(data.error) log(data.msg, 'error');
-             else log(data.msg, 'cmd');
+             if(data.error) log(data.msg, 'error'); else log(data.msg, 'cmd');
              return;
         }
-
         const modal = document.getElementById('progressModal');
-        const bar = document.getElementById('progressBar');
-        const percentTxt = document.getElementById('progressPercent');
-        const sizeTxt = document.getElementById('progressSize');
-        const detailTxt = document.getElementById('progressDetail');
-
         modal.classList.add('active');
-        
         const percentage = Math.round(data.percent);
-        bar.style.width = `${percentage}%`;
-        percentTxt.innerText = `${percentage}%`;
-        detailTxt.innerText = data.status || 'Processing...';
-
+        document.getElementById('progressBar').style.width = `${percentage}%`;
+        document.getElementById('progressPercent').innerText = `${percentage}%`;
+        document.getElementById('progressDetail').innerText = data.status || 'Processing...';
         if(data.total) {
-            const currentMB = (data.current / (1024 * 1024)).toFixed(1);
-            const totalMB = (data.total / (1024 * 1024)).toFixed(1);
-            sizeTxt.innerText = `${currentMB}/${totalMB} MB`;
+            document.getElementById('progressSize').innerText = `${(data.current / 1048576).toFixed(1)}/${(data.total / 1048576).toFixed(1)} MB`;
         }
     });
 }
@@ -211,95 +290,113 @@ if (window.api && window.api.onDownloadProgress) {
 btnDownload.addEventListener('click', async () => {
   const version = phpSelect.value;
   const modal = document.getElementById('progressModal');
-  
-  log(`Initializing download for PHP ${version}...`, 'info');
-  
-  // Show modal immediately with 0%
   modal.classList.add('active');
-  document.getElementById('progressBar').style.width = '0%';
-  document.getElementById('progressPercent').innerText = '0%';
-  document.getElementById('progressDetail').innerText = 'Connecting...';
-  
   try {
     const result = await window.api.downloadPhp(version);
-    
     modal.classList.remove('active'); 
-    
     if (result.success) {
-      log(`PHP ${version} installed successfully!`, 'success');
-      log(`Location: ${result.path}`, 'info');
-      
-      // Refresh cache and UI
+      log(`PHP ${version} installed.`, 'success');
       await refreshPhpStatus();
-      
-      setTimeout(() => alert(`PHP ${version} downloaded and verified!`), 100);
     } else {
-      log(`Download Error: ${result.error}`, 'error');
       alert(`Error: ${result.error}`);
     }
-  } catch (e) {
-    modal.classList.remove('active');
-    log(`Error: ${e.message}`, 'error');
-  }
+  } catch (e) { modal.classList.remove('active'); }
 });
-
 
 // File Pickers
-document.getElementById('btnSelectSource').addEventListener('click', async () => {
-  const path = await window.api.selectFolder();
-  if (path) {
-    document.getElementById('sourcePath').value = path;
-    log(`Selected Project Source: ${path}`);
-  }
-});
-
 document.getElementById('btnSelectPhp').addEventListener('click', async () => {
   const path = await window.api.selectFolder();
-  if (path) {
-    document.getElementById('phpPath').value = path;
-    log(`Selected PHP Binary Folder: ${path}`);
-  }
+  if (path) document.getElementById('phpPath').value = path;
 });
-
 document.getElementById('btnSelectIcon').addEventListener('click', async () => {
   const path = await window.api.selectFile(['png', 'ico', 'icns']);
-  if (path) {
-    document.getElementById('iconPath').value = path;
-    log(`Selected App Icon: ${path}`);
-  }
+  if (path) document.getElementById('iconPath').value = path;
 });
 
-// Config Collector
+// Form Helper
+function resetForm() {
+    document.getElementById('appName').value = 'my-electron-app';
+    document.getElementById('productName').value = 'My Awesome App';
+    document.getElementById('appVersion').value = '1.0.0';
+    document.getElementById('appAuthor').value = 'VisualNEO User';
+    document.getElementById('entryPoint').value = 'index.html';
+    document.getElementById('winWidth').value = 1280;
+    document.getElementById('winHeight').value = 800;
+    document.getElementById('resizable').checked = true;
+    document.getElementById('fullscreenable').checked = true;
+    document.getElementById('saveState').checked = true;
+    document.getElementById('kiosk').checked = false;
+    document.getElementById('enablePhp').checked = false;
+    document.getElementById('phpPath').value = '';
+    document.getElementById('phpPort').value = 8000;
+    selectedExtensions = new Set(['curl', 'gd', 'mbstring', 'sqlite3', 'openssl']);
+    renderExtensions();
+    document.getElementById('extraExtensions').value = '';
+    phpToggle.dispatchEvent(new Event('change'));
+}
+
+function populateForm(c) {
+    document.getElementById('appName').value = c.appName || '';
+    document.getElementById('productName').value = c.productName || '';
+    document.getElementById('appVersion').value = c.version || '1.0.0';
+    document.getElementById('appAuthor').value = c.author || '';
+    document.getElementById('entryPoint').value = c.entryPoint || 'index.html';
+    document.getElementById('winWidth').value = c.width || 1280;
+    document.getElementById('winHeight').value = c.height || 800;
+    document.getElementById('minWidth').value = c.minWidth || 0;
+    document.getElementById('minHeight').value = c.minHeight || 0;
+    
+    document.getElementById('resizable').checked = c.resizable;
+    document.getElementById('fullscreenable').checked = c.fullscreenable;
+    document.getElementById('kiosk').checked = c.kiosk;
+    document.getElementById('saveState').checked = c.saveState;
+    document.getElementById('center').checked = c.center;
+    
+    document.getElementById('enablePhp').checked = c.enablePhp;
+    if(c.phpPath) document.getElementById('phpPath').value = c.phpPath;
+    document.getElementById('phpPort').value = c.phpPort || 8000;
+    document.getElementById('phpMemory').value = c.phpMemory || '256M';
+    document.getElementById('phpUpload').value = c.phpUpload || '64M';
+    document.getElementById('phpTime').value = c.phpTime || 120;
+    
+    selectedExtensions = new Set(c.phpExtensions || []);
+    renderExtensions();
+    
+    document.getElementById('trayIcon').checked = c.trayIcon;
+    document.getElementById('minimizeToTray').checked = c.minimizeToTray;
+    document.getElementById('runBackground').checked = c.runBackground;
+    document.getElementById('singleInstance').checked = c.singleInstance;
+    document.getElementById('devTools').checked = c.devTools;
+    document.getElementById('contextMenu').checked = c.contextMenu;
+    document.getElementById('userAgent').value = c.userAgent || '';
+    document.getElementById('iconPath').value = c.iconPath || '';
+    
+    document.getElementById('targetNsis').checked = c.targetNsis;
+    document.getElementById('targetPortable').checked = c.targetPortable;
+    document.getElementById('targetUnpacked').checked = c.targetUnpacked;
+    
+    phpToggle.dispatchEvent(new Event('change'));
+}
+
 function getAppConfig() {
   const sourcePath = document.getElementById('sourcePath').value;
-  if (!sourcePath) {
-    log('Error: Please select a Source Folder first.', 'error');
-    alert('Please select a Web App Source Folder.');
-    return null;
-  }
+  if (!sourcePath) return null;
 
   const enablePhp = document.getElementById('enablePhp').checked;
   const phpPath = document.getElementById('phpPath').value;
-  
   if (enablePhp && !phpPath) {
-    log('Error: PHP is enabled but no PHP folder selected/downloaded.', 'error');
-    alert('Please select or download a PHP version.');
+    alert('Please select a PHP folder.');
     return null;
   }
 
   const extraExt = document.getElementById('extraExtensions').value.split(',').map(s => s.trim()).filter(s => s);
-  const finalExtensions = [...selectedExtensions, ...extraExt];
-
   return {
-    // Project
-    appName: document.getElementById('appName').value || 'my-app',
-    productName: document.getElementById('productName').value || 'My App',
-    version: document.getElementById('appVersion').value || '1.0.0',
-    author: document.getElementById('appAuthor').value || '',
+    appName: document.getElementById('appName').value,
+    productName: document.getElementById('productName').value,
+    version: document.getElementById('appVersion').value,
+    author: document.getElementById('appAuthor').value,
     sourcePath: sourcePath,
     entryPoint: document.getElementById('entryPoint').value,
-    
-    // Window
     width: parseInt(document.getElementById('winWidth').value) || 1024,
     height: parseInt(document.getElementById('winHeight').value) || 768,
     minWidth: parseInt(document.getElementById('minWidth').value) || 0,
@@ -310,17 +407,13 @@ function getAppConfig() {
     saveState: document.getElementById('saveState').checked,
     nativeFrame: true, 
     center: document.getElementById('center').checked,
-
-    // PHP
     enablePhp: enablePhp,
     phpPath: phpPath,
-    phpPort: document.getElementById('phpPort').value || 8000,
+    phpPort: document.getElementById('phpPort').value,
     phpMemory: document.getElementById('phpMemory').value,
     phpUpload: document.getElementById('phpUpload').value,
     phpTime: document.getElementById('phpTime').value,
-    phpExtensions: finalExtensions,
-
-    // System
+    phpExtensions: [...selectedExtensions, ...extraExt],
     trayIcon: document.getElementById('trayIcon').checked,
     minimizeToTray: document.getElementById('minimizeToTray').checked,
     runBackground: document.getElementById('runBackground').checked,
@@ -328,8 +421,6 @@ function getAppConfig() {
     devTools: document.getElementById('devTools').checked,
     contextMenu: document.getElementById('contextMenu').checked,
     userAgent: document.getElementById('userAgent').value,
-
-    // Build
     iconPath: document.getElementById('iconPath').value,
     targetNsis: document.getElementById('targetNsis').checked,
     targetPortable: document.getElementById('targetPortable').checked,
@@ -337,43 +428,25 @@ function getAppConfig() {
   };
 }
 
-// Generate Only
+// Actions
 document.getElementById('btnGenerateOnly').addEventListener('click', async () => {
   const config = getAppConfig();
   if(!config) return;
-
-  log('Generating Configuration Files...', 'info');
-  try {
-    const result = await window.api.generateApp(config);
-    if (result.success) {
-       log('Configuration Generated Successfully.', 'success');
-    } else {
-       log(`Error: ${result.error}`, 'error');
-    }
-  } catch(e) {
-    log(e.message, 'error');
-  }
+  await window.api.saveProjectConfig(currentProjectPath, config);
+  const result = await window.api.generateApp(config);
+  if (result.success) log('Configuration Generated.', 'success');
+  else log(`Error: ${result.error}`, 'error');
 });
 
-// Full Build
 document.getElementById('btnBuildFull').addEventListener('click', async () => {
   const config = getAppConfig();
   if(!config) return;
-
-  // 1. Generate
-  log('--- STARTING AUTOMATED BUILD ---', 'info');
-  log('Step 1: Generating Config...', 'info');
   
+  await window.api.saveProjectConfig(currentProjectPath, config);
+  
+  log('--- STARTING BUILD ---', 'info');
   const genResult = await window.api.generateApp(config);
-  if (!genResult.success) {
-    log(`Generation Failed: ${genResult.error}`, 'error');
-    return;
-  }
-  log('Configuration files created.', 'success');
-
-  // 2. Build via Main Process
-  log('Step 2: Installing dependencies & Building...', 'info');
-  log('NOTE: This requires Node.js to be installed on your system.', 'warn');
+  if (!genResult.success) { log(`Gen Failed: ${genResult.error}`, 'error'); return; }
   
   const btn = document.getElementById('btnBuildFull');
   btn.disabled = true;
@@ -381,24 +454,15 @@ document.getElementById('btnBuildFull').addEventListener('click', async () => {
 
   try {
     const result = await window.api.buildApp(config.sourcePath);
-    
     if (result.success) {
-       log('---------------------------------', 'success');
-       log('BUILD COMPLETED SUCCESSFULLY!', 'success');
-       log('Check the "dist" folder inside your project.', 'info');
-       log('---------------------------------', 'success');
+       log('BUILD COMPLETED!', 'success');
        alert('Build Complete!');
     } else {
-       log('---------------------------------', 'error');
        log('BUILD FAILED.', 'error');
-       log('Please check the logs above for details.', 'error');
-       log('Ensure Node.js is installed and accessible.', 'warn');
-       log('---------------------------------', 'error');
     }
-  } catch (e) {
-     log(`Critical Error: ${e.message}`, 'error');
-  } finally {
-    btn.disabled = false;
-    btn.innerHTML = '<i class="fa-solid fa-play-circle"></i> BUILD EXECUTABLE';
-  }
+  } catch (e) { log(e.message, 'error'); }
+  finally { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-play-circle"></i> BUILD EXECUTABLE'; }
 });
+
+// Initial Render
+renderProjectList();

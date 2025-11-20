@@ -9,7 +9,14 @@ contextBridge.exposeInMainWorld('api', {
   buildApp: (targetPath) => ipcRenderer.invoke('build-app', targetPath),
   getPhpCache: () => ipcRenderer.invoke('get-php-cache'),
   copyToClipboard: (text) => ipcRenderer.invoke('copy-to-clipboard', text),
-  onDownloadProgress: (callback) => ipcRenderer.on('download-progress', (_event, value) => callback(value))
+  onDownloadProgress: (callback) => ipcRenderer.on('download-progress', (_event, value) => callback(value)),
+  
+  // Project Manager
+  getProjects: () => ipcRenderer.invoke('get-projects'),
+  addProject: (path) => ipcRenderer.invoke('add-project', path),
+  removeProject: (id) => ipcRenderer.invoke('remove-project', id),
+  loadProjectConfig: (path) => ipcRenderer.invoke('load-project-config', path),
+  saveProjectConfig: (path, config) => ipcRenderer.invoke('save-project-config', { folderPath: path, config })
 });
 
 contextBridge.exposeInMainWorld('versions', {

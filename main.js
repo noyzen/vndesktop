@@ -145,6 +145,23 @@ async function verifyPhp(rootDir) {
   });
 }
 
+// --- PROJECT MANAGER PERSISTENCE ---
+
+const projectsFile = path.join(app.getPath('userData'), 'projects.json');
+
+function getProjectsList() {
+  try {
+    if (!fs.existsSync(projectsFile)) return [];
+    return JSON.parse(fs.readFileSync(projectsFile, 'utf8'));
+  } catch (e) {
+    return [];
+  }
+}
+
+function saveProjectsList(list) {
+  fs.writeFileSync(projectsFile, JSON.stringify(list, null, 2));
+}
+
 // --- MAIN PROCESS ---
 
 let mainWindow;
@@ -194,6 +211,73 @@ ipcMain.handle('select-file', async (event, extensions) => {
 ipcMain.handle('copy-to-clipboard', async (event, text) => {
   clipboard.writeText(text);
   return true;
+});
+
+// Project Manager Handlers
+ipcMain.handle('get-projects', () => getProjectsList());
+
+ipcMain.handle('add-project', async (e, folderPath) => {
+  const list = getProjectsList();
+  const existing = list.find(p => p.path === folderPath);
+  const timestamp = Date.now();
+  
+  if (existing) {
+    existing.lastUsed = timestamp;
+  } else {
+    list.unshift({
+      id: timestamp,
+      path: folderPath,
+      name: path.basename(folderPath),
+      lastUsed: timestamp
+    });
+  }
+  
+  // Sort by last used
+  list.sort((a, b) => b.lastUsed - a.lastUsed);
+  saveProjectsList(list);
+  return list;
+});
+
+ipcMain.handle('remove-project', async (e, id) => {
+  let list = getProjectsList();
+  list = list.filter(p => p.id !== id);
+  saveProjectsList(list);
+  return list;
+});
+
+ipcMain.handle('load-project-config', async (e, folderPath) => {
+  try {
+    const configFile = path.join(folderPath, 'vnbuild', 'visualneo.json');
+    if (fs.existsSync(configFile)) {
+      return JSON.parse(fs.readFileSync(configFile, 'utf8'));
+    }
+  } catch (e) {
+    console.error("Failed to load config", e);
+  }
+  return null;
+});
+
+ipcMain.handle('save-project-config', async (e, { folderPath, config }) => {
+  try {
+    const buildDir = path.join(folderPath, 'vnbuild');
+    if (!fs.existsSync(buildDir)) fs.mkdirSync(buildDir, { recursive: true });
+    
+    const configFile = path.join(buildDir, 'visualneo.json');
+    fs.writeFileSync(configFile, JSON.stringify(config, null, 2));
+    
+    // Update last used
+    const list = getProjectsList();
+    const p = list.find(x => x.path === folderPath);
+    if(p) { 
+        p.lastUsed = Date.now(); 
+        list.sort((a, b) => b.lastUsed - a.lastUsed);
+        saveProjectsList(list);
+    }
+    
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
 });
 
 ipcMain.handle('get-php-cache', async () => {
@@ -260,34 +344,28 @@ ipcMain.handle('download-php', async (event, version) => {
 ipcMain.handle('generate-app', async (event, config) => {
   try {
     const sourceRoot = config.sourcePath;
-    // Enforce vnbuild usage
     const buildDir = path.join(sourceRoot, 'vnbuild');
     const wwwDir = path.join(buildDir, 'www');
     const binDir = path.join(buildDir, 'bin');
     
     if (!fs.existsSync(buildDir)) fs.mkdirSync(buildDir, { recursive: true });
     
-    // Clean previous build files but keep node_modules if it exists to save install time
+    // Clean previous build files but keep node_modules if it exists
     if (fs.existsSync(wwwDir)) fs.rmSync(wwwDir, { recursive: true, force: true });
     if (fs.existsSync(binDir)) fs.rmSync(binDir, { recursive: true, force: true });
 
-    // Copy project files to vnbuild/www, excluding build artifacts and git
     const exclusions = ['vnbuild', '.git', '.vscode', 'node_modules', 'dist', 'release', 'out'];
     fs.mkdirSync(wwwDir, { recursive: true });
     copyFolderRecursiveSync(sourceRoot, wwwDir, exclusions);
 
-    // Handle PHP
     if (config.enablePhp && config.phpPath) {
        const phpDest = path.join(binDir, 'php');
        fs.mkdirSync(binDir, { recursive: true });
-       
-       // Copy PHP files
        copyFolderRecursiveSync(config.phpPath, phpDest, []);
        
-       // Validate PHP copy
        const phpExeCheck = path.join(phpDest, 'php.exe');
        if (!fs.existsSync(phpExeCheck)) {
-           throw new Error("Failed to copy php.exe to build directory. Check your PHP source folder.");
+           throw new Error("Failed to copy php.exe. Check source folder.");
        }
        
        let extensionStr = `extension_dir = "ext"\n`;
@@ -319,10 +397,11 @@ ${extensionStr}
 
     fs.writeFileSync(path.join(buildDir, 'package.json'), generatePackageJson(config));
     fs.writeFileSync(path.join(buildDir, 'main.js'), generateMainJs(config));
-    fs.writeFileSync(path.join(buildDir, 'build.bat'), 
-`@echo off
-npm install && npm run build
-pause`);
+    fs.writeFileSync(path.join(buildDir, 'build.bat'), `@echo off\nnpm install && npm run build\npause`);
+
+    // Save config persistence
+    const configFile = path.join(buildDir, 'visualneo.json');
+    fs.writeFileSync(configFile, JSON.stringify(config, null, 2));
 
     return { success: true };
   } catch (error) {
@@ -390,15 +469,13 @@ function generatePackageJson(c) {
   if (c.targetPortable) targets.push("portable");
   if (c.targetUnpacked) targets.push("dir");
 
-  // Ensure "dist" is inside vnbuild (implicitly handled by running in vnbuild dir)
-  // "asar": false is CRITICAL for PHP to read files and spawn correctly from a real path
   const buildConfig = {
     appId: `com.visualneo.${c.appName.replace(/\s+/g, '').toLowerCase()}`,
     productName: c.productName,
     files: ["main.js", "www/**/*"],
     extraResources: c.enablePhp ? [{ "from": "bin/php", "to": "php", "filter": ["**/*"] }] : [],
     directories: { "output": "dist" },
-    asar: false, 
+    asar: false,
     win: { target: targets, icon: c.iconPath ? path.basename(c.iconPath) : undefined },
     nsis: { oneClick: false, allowToChangeInstallationDirectory: true, createDesktopShortcut: true }
   };
@@ -442,7 +519,6 @@ const CONFIG = {
 
 let mainWindow, tray = null, isQuitting = false, phpProcess = null, serverUrl = null;
 
-// Because 'asar: false', __dirname is a real path on disk.
 const webRoot = path.join(__dirname, 'www');
 const statePath = path.join(app.getPath('userData'), 'window-state.json');
 
@@ -464,8 +540,6 @@ async function startPhpServer() {
 
     try {
       const port = await portfinder.getPortPromise({ port: CONFIG.phpPort });
-      
-      // Resolve PHP binary path
       let phpBin;
       if (app.isPackaged) {
          phpBin = path.join(process.resourcesPath, 'php', 'php.exe');
@@ -479,10 +553,9 @@ async function startPhpServer() {
       
       const iniPath = path.join(path.dirname(phpBin), 'php.ini');
       
-      // Spawn PHP with explicit CWD to the webRoot
       phpProcess = spawn(phpBin, ['-S', '127.0.0.1:' + port, '-t', webRoot, '-c', iniPath], {
         cwd: webRoot,
-        stdio: 'ignore', // Detach stdio to prevent hanging if buffer fills, or use 'pipe' for debug
+        stdio: 'ignore',
         windowsHide: true
       });
 
@@ -491,7 +564,7 @@ async function startPhpServer() {
       });
 
       serverUrl = \`http://127.0.0.1:\${port}/\`;
-      setTimeout(resolve, 500, serverUrl); // Give it a moment to spin up
+      setTimeout(resolve, 500, serverUrl); 
 
     } catch (e) {
       reject(e);
