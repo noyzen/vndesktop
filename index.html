@@ -2,77 +2,357 @@
 <html>
 <head>
     <meta charset="UTF-8" />
-    <title>Hello Electron!</title>
-    <!-- 
-      CSP is a security feature that helps prevent cross-site scripting (XSS) 
-      and other code injection attacks.
-    -->
+    <title>VisualNEO Desktop Builder</title>
     <meta http-equiv="Content-Security-Policy" content="script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self';" />
     <link rel="stylesheet" href="./public/fonts/all.min.css">
     <style>
+      :root {
+        --bg-dark: #1e1e1e;
+        --bg-panel: #252526;
+        --bg-input: #3c3c3c;
+        --accent: #007acc;
+        --accent-hover: #0062a3;
+        --text-main: #cccccc;
+        --text-header: #ffffff;
+        --border: #333333;
+      }
+
       body {
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-        background-color: #121212;
-        color: #e0e0e0;
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        height: 100vh;
+        font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        background-color: var(--bg-dark);
+        color: var(--text-main);
         margin: 0;
-        -webkit-font-smoothing: antialiased;
-        -moz-osx-font-smoothing: grayscale;
-        text-align: center;
+        display: flex;
+        height: 100vh;
+        overflow: hidden;
+        user-select: none;
       }
 
-      .container {
-        padding: 3rem 4rem;
-        border-radius: 12px;
-        background: linear-gradient(145deg, #1e1e1e, #2a2a2a);
-        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
-        border: 1px solid #333;
+      /* Sidebar */
+      .sidebar {
+        width: 250px;
+        background-color: #2d2d2d;
+        display: flex;
+        flex-direction: column;
+        border-right: 1px solid var(--border);
       }
 
-      .logo {
-        width: 100px;
-        height: 100px;
-        margin-bottom: 1.5rem;
-      }
-
-      h1 {
-        font-size: 3rem;
-        font-weight: 300;
-        color: #00aaff;
-        margin: 0 0 0.5rem 0;
+      .brand {
+        padding: 20px;
+        font-size: 1.2rem;
+        font-weight: bold;
+        color: var(--text-header);
         display: flex;
         align-items: center;
-        justify-content: center;
-        gap: 1rem;
+        gap: 10px;
+        background: #252526;
+        border-bottom: 1px solid var(--border);
       }
 
-      p {
-        font-size: 1.25rem;
-        color: #a0a0a0;
-        margin-top: 0;
+      .brand i { color: var(--accent); }
+
+      .nav-item {
+        padding: 15px 20px;
+        cursor: pointer;
+        transition: background 0.2s;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        border-left: 3px solid transparent;
       }
 
-      #info {
-        margin-top: 2.5rem;
+      .nav-item:hover { background-color: #3a3a3a; }
+      .nav-item.active {
+        background-color: #37373d;
+        border-left-color: var(--accent);
+        color: white;
+      }
+
+      /* Main Content */
+      .main-content {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        background-color: var(--bg-dark);
+      }
+
+      .header {
+        padding: 20px 30px;
+        border-bottom: 1px solid var(--border);
+        background-color: var(--bg-panel);
+      }
+      
+      .header h2 { margin: 0; color: white; font-weight: 300; }
+
+      .tab-content {
+        display: none;
+        padding: 30px;
+        overflow-y: auto;
+        flex: 1;
+      }
+      .tab-content.active { display: block; }
+
+      /* Forms */
+      .form-group { margin-bottom: 20px; }
+      .form-row { display: flex; gap: 20px; margin-bottom: 20px; }
+      .col { flex: 1; }
+
+      label {
+        display: block;
+        margin-bottom: 8px;
         font-size: 0.9rem;
-        color: #666;
-        border-top: 1px solid #333;
-        padding-top: 1rem;
+        color: #aaa;
       }
+
+      input[type="text"], input[type="number"] {
+        width: 100%;
+        padding: 10px;
+        background-color: var(--bg-input);
+        border: 1px solid var(--border);
+        color: white;
+        border-radius: 4px;
+        box-sizing: border-box;
+      }
+
+      input[type="text"]:focus, input[type="number"]:focus {
+        outline: 1px solid var(--accent);
+      }
+
+      .file-input-wrapper {
+        display: flex;
+        gap: 10px;
+      }
+
+      button {
+        padding: 10px 20px;
+        background-color: var(--accent);
+        color: white;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 0.9rem;
+        transition: 0.2s;
+      }
+      button:hover { background-color: var(--accent-hover); }
+      button.secondary { background-color: #444; }
+      button.secondary:hover { background-color: #555; }
+
+      /* Checkboxes */
+      .checkbox-group {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 10px;
+        cursor: pointer;
+        background: #2d2d2d;
+        padding: 10px;
+        border-radius: 4px;
+        border: 1px solid var(--border);
+      }
+      
+      .checkbox-group input { margin: 0; }
+
+      /* Console / Footer */
+      .footer {
+        background-color: #111;
+        border-top: 1px solid var(--border);
+        padding: 10px;
+        height: 120px;
+        overflow-y: auto;
+        font-family: 'Courier New', Courier, monospace;
+        font-size: 0.85rem;
+      }
+      .log-line { margin: 2px 0; }
+      .log-success { color: #4caf50; }
+      .log-info { color: #2196f3; }
+      .log-error { color: #f44336; }
+
+      h3 { border-bottom: 1px solid #444; padding-bottom: 10px; margin-top: 0; color: #ddd; }
     </style>
 </head>
 <body>
-    <div class="container">
-      <img src="./public/appicon.png" alt="App Logo" class="logo">
-      <h1><i class="fa-regular fa-paper-plane"></i> Hello Electron!</h1>
-      <p>A minimal desktop app built with power.</p>
-      <div id="info"></div>
+
+    <div class="sidebar">
+      <div class="brand"><i class="fa-solid fa-cubes"></i> VisualNEO</div>
+      <div class="nav-item active" data-tab="project">
+        <i class="fa-solid fa-folder-open"></i> Project
+      </div>
+      <div class="nav-item" data-tab="window">
+        <i class="fa-solid fa-desktop"></i> Window
+      </div>
+      <div class="nav-item" data-tab="system">
+        <i class="fa-solid fa-gear"></i> System
+      </div>
+      <div class="nav-item" data-tab="build">
+        <i class="fa-solid fa-hammer"></i> Build
+      </div>
     </div>
 
-    <!-- Import the renderer script -->
+    <div class="main-content">
+      <div class="header">
+        <h2 id="header-title">Project Settings</h2>
+      </div>
+
+      <!-- PROJECT TAB -->
+      <div id="tab-project" class="tab-content active">
+        <h3>App Metadata</h3>
+        <div class="form-row">
+          <div class="col">
+            <label>Application Name (System ID)</label>
+            <input type="text" id="appName" placeholder="my-awesome-app" value="my-electron-app">
+          </div>
+          <div class="col">
+            <label>Product Name (Visible Title)</label>
+            <input type="text" id="productName" placeholder="My Awesome App" value="My Awesome App">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="col">
+            <label>Version</label>
+            <input type="text" id="appVersion" value="1.0.0">
+          </div>
+          <div class="col">
+            <label>Author / Company</label>
+            <input type="text" id="appAuthor" placeholder="Your Name" value="VisualNEO User">
+          </div>
+        </div>
+
+        <h3>Source</h3>
+        <div class="form-group">
+          <label>Web App Source Folder (Contains index.html)</label>
+          <div class="file-input-wrapper">
+            <input type="text" id="sourcePath" readonly placeholder="Select folder...">
+            <button id="btnSelectSource" class="secondary"><i class="fa-solid fa-folder"></i> Browse</button>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Entry Point (Relative to Source)</label>
+          <input type="text" id="entryPoint" value="index.html" placeholder="index.html or index.php">
+        </div>
+      </div>
+
+      <!-- WINDOW TAB -->
+      <div id="tab-window" class="tab-content">
+        <h3>Dimensions</h3>
+        <div class="form-row">
+          <div class="col">
+            <label>Initial Width</label>
+            <input type="number" id="winWidth" value="1024">
+          </div>
+          <div class="col">
+            <label>Initial Height</label>
+            <input type="number" id="winHeight" value="768">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="col">
+            <label>Min Width (0 = none)</label>
+            <input type="number" id="minWidth" value="800">
+          </div>
+          <div class="col">
+            <label>Min Height (0 = none)</label>
+            <input type="number" id="minHeight" value="600">
+          </div>
+        </div>
+
+        <h3>Behavior</h3>
+        <div class="form-row">
+          <div class="col">
+            <label class="checkbox-group">
+              <input type="checkbox" id="resizable" checked> Resizable Window
+            </label>
+            <label class="checkbox-group">
+              <input type="checkbox" id="fullscreenable" checked> Allow Fullscreen
+            </label>
+            <label class="checkbox-group">
+              <input type="checkbox" id="kiosk"> Kiosk Mode (Locked Fullscreen)
+            </label>
+          </div>
+          <div class="col">
+            <label class="checkbox-group">
+              <input type="checkbox" id="saveState" checked> Save Window Position & Size
+            </label>
+            <label class="checkbox-group">
+              <input type="checkbox" id="frame" checked> Show Window Frame/Chrome
+            </label>
+            <label class="checkbox-group">
+              <input type="checkbox" id="center" checked> Center on Start
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <!-- SYSTEM TAB -->
+      <div id="tab-system" class="tab-content">
+        <h3>System Integration</h3>
+        <div class="form-row">
+          <div class="col">
+             <label class="checkbox-group">
+              <input type="checkbox" id="trayIcon"> Show System Tray Icon
+            </label>
+            <label class="checkbox-group">
+              <input type="checkbox" id="minimizeToTray"> Minimize to Tray on Close
+            </label>
+          </div>
+          <div class="col">
+            <label class="checkbox-group">
+              <input type="checkbox" id="singleInstance" checked> Single Instance Only
+            </label>
+            <label class="checkbox-group">
+              <input type="checkbox" id="devTools" checked> Enable DevTools (F12)
+            </label>
+          </div>
+        </div>
+        
+        <h3>Environment</h3>
+        <div class="form-group">
+          <label>Custom User Agent (Optional)</label>
+          <input type="text" id="userAgent" placeholder="Leave empty for default">
+        </div>
+      </div>
+
+      <!-- BUILD TAB -->
+      <div id="tab-build" class="tab-content">
+        <h3>Assets</h3>
+        <div class="form-group">
+          <label>Application Icon (.png or .ico)</label>
+          <div class="file-input-wrapper">
+            <input type="text" id="iconPath" readonly placeholder="Select icon file...">
+            <button id="btnSelectIcon" class="secondary"><i class="fa-solid fa-image"></i> Browse</button>
+          </div>
+        </div>
+
+        <h3>Output Targets</h3>
+        <div class="form-row">
+          <div class="col">
+             <label class="checkbox-group">
+              <input type="checkbox" id="targetNsis" checked> Windows Setup (.exe)
+            </label>
+            <label class="checkbox-group">
+              <input type="checkbox" id="targetPortable" checked> Windows Portable (.exe)
+            </label>
+          </div>
+          <div class="col">
+            <label class="checkbox-group">
+              <input type="checkbox" id="targetUnpacked"> Unpacked Directory
+            </label>
+             <p style="font-size:0.8rem; color:#888;">Note: Linux/Mac targets are supported if building on those OSs.</p>
+          </div>
+        </div>
+
+        <div style="margin-top: 40px; text-align: center;">
+          <button id="btnGenerate" style="padding: 15px 40px; font-size: 1.2rem;">
+            <i class="fa-solid fa-wand-magic-sparkles"></i> GENERATE DESKTOP APP
+          </button>
+        </div>
+      </div>
+
+      <div class="footer" id="consoleOutput">
+        <div class="log-line">VisualNEO Desktop Builder Ready.</div>
+        <div class="log-line">Select your project folder to begin.</div>
+      </div>
+    </div>
+
     <script src="./renderer.js"></script>
 </body>
 </html>

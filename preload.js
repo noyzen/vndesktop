@@ -1,8 +1,11 @@
+const { contextBridge, ipcRenderer } = require('electron');
 
-const { contextBridge } = require('electron');
+contextBridge.exposeInMainWorld('api', {
+  selectFolder: () => ipcRenderer.invoke('select-folder'),
+  selectFile: (extensions) => ipcRenderer.invoke('select-file', extensions),
+  generateApp: (config) => ipcRenderer.invoke('generate-app', config)
+});
 
-// Expose protected methods that allow the renderer process to use
-// the Node.js process.versions API without exposing the entire object.
 contextBridge.exposeInMainWorld('versions', {
   node: () => process.versions.node,
   chrome: () => process.versions.chrome,
