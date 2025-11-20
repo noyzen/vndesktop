@@ -662,13 +662,24 @@ ipcMain.handle('generate-app', async (event, config) => {
     
     // --- COPY APP ICON ---
     // We explicitly copy the icon to vnbuild so it is included in the bundle
-    const iconDest = path.join(buildDir, 'app-icon.png');
+    // Preserve extension to ensure Tray and Window icon consistency (especially for .ico)
+    let iconFileName = 'app-icon.png';
     if (config.iconPath && fs.existsSync(config.iconPath)) {
-        try { fs.copyFileSync(config.iconPath, iconDest); } catch(e) { console.error(e); }
+        const ext = path.extname(config.iconPath).toLowerCase();
+        iconFileName = `app-icon${ext}`;
+        const iconDest = path.join(buildDir, iconFileName);
+        try { 
+            fs.copyFileSync(config.iconPath, iconDest); 
+        } catch(e) { 
+            // Fallback
+            iconFileName = 'app-icon.png';
+            fs.copyFileSync(path.join(__dirname, 'public/appicon.png'), path.join(buildDir, iconFileName));
+        }
     } else {
-        // Fallback
-        try { fs.copyFileSync(path.join(__dirname, 'public/appicon.png'), iconDest); } catch(e) {}
+        fs.copyFileSync(path.join(__dirname, 'public/appicon.png'), path.join(buildDir, 'app-icon.png'));
     }
+    
+    config.trayIconFileName = iconFileName;
 
     if (config.enablePhp && config.phpPath) {
        const phpDest = path.join(binDir, 'php');
@@ -895,8 +906,9 @@ function generatePackageJson(c) {
       extraResources.push({ "from": "www", "to": "www_source", "filter": ["**/*"] });
   }
 
-  // Include the app-icon.png we copied in files list
-  const files = c.enablePhp ? ["main.js", "app-icon.png"] : ["main.js", "app-icon.png", "www/**/*"];
+  // Use the correct icon filename that we copied to the build folder
+  const iconFile = c.trayIconFileName || 'app-icon.png';
+  const files = c.enablePhp ? ["main.js", iconFile] : ["main.js", iconFile, "www/**/*"];
 
   const buildConfig = {
     appId: `com.visualneo.${c.appName.replace(/\s+/g, '').toLowerCase()}`,
@@ -905,7 +917,8 @@ function generatePackageJson(c) {
     extraResources: extraResources,
     directories: { "output": "dist" },
     asar: true,
-    win: { target: targets, icon: c.iconPath ? path.basename(c.iconPath) : undefined },
+    // Point to the local icon file for the installer (if passed relative, electron-builder looks in project root)
+    win: { target: targets, icon: iconFile },
     nsis: { oneClick: false, allowToChangeInstallationDirectory: true, createDesktopShortcut: true }
   };
 
@@ -925,7 +938,9 @@ function generatePackageJson(c) {
 }
 
 function generateMainJs(c) {
-  return `const { app, BrowserWindow, Tray, Menu, ipcMain, shell, dialog } = require('electron');
+  const iconFile = c.trayIconFileName || 'app-icon.png';
+  
+  return `const { app, BrowserWindow, Tray, Menu, ipcMain, shell, dialog, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { spawn, execSync } = require('child_process');
@@ -1105,7 +1120,7 @@ function createWindow() {
     webPreferences: { nodeIntegration: false, contextIsolation: true, devTools: ${c.devTools} }
   };
 
-  ${c.iconPath ? `winConfig.icon = path.join(__dirname, 'app-icon.png');` : ''}
+  ${c.iconPath ? `winConfig.icon = path.join(__dirname, '${iconFile}');` : ''}
 
   mainWindow = new BrowserWindow(winConfig);
   mainWindow.setMenu(null);
@@ -1162,11 +1177,13 @@ function createWindow() {
 
 function createTray() {
   if (!CONFIG.tray) return;
-  const iconPath = path.join(__dirname, 'app-icon.png');
+  const iconPath = path.join(__dirname, '${iconFile}');
 
   try {
+     // Robust check for icon existence
      if(fs.existsSync(iconPath)) {
-         tray = new Tray(iconPath);
+         const image = nativeImage.createFromPath(iconPath);
+         tray = new Tray(image);
          tray.setToolTip(CONFIG.title);
          tray.setContextMenu(Menu.buildFromTemplate([
            { label: 'Open', click: () => mainWindow.show() },
@@ -1175,6 +1192,7 @@ function createTray() {
          tray.on('click', () => mainWindow.isVisible() ? mainWindow.hide() : mainWindow.show());
      }
   } catch (e) {
+     // Fallback if tray creation fails
      if(mainWindow) mainWindow.setSkipTaskbar(false);
   }
 }
