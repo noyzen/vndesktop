@@ -638,13 +638,6 @@ ipcMain.handle('build-app', async (event, sourceRoot) => {
                 } catch(e) { 
                     // Process was not running, safe to proceed
                 }
-                
-                // Try to kill orphaned php.exe in the unpacked folder to release locks
-                // This assumes standard build path
-                try {
-                     // This is a best effort. We can't easily filter taskkill by path in JS without logic
-                     // But we can try to rely on the fact that we killed the parent.
-                } catch(e) {}
             }
         } catch(e) {
             sendLog('Warning: Instance check skipped.', true);
@@ -881,21 +874,26 @@ async function startPhpServer() {
       // Port 0 = OS assigns free port. Robust for multiple instances.
       phpProcess = spawn(phpExe, ['-S', '127.0.0.1:0', '-t', env.docRoot, '-c', phpIni], {
         cwd: env.docRoot,
-        windowsHide: true
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'] // pipe standard streams to capture port
       });
 
       let portFound = false;
+      
+      // Reduced timeout to 8s for better responsiveness on error
       const timer = setTimeout(() => {
           if(!portFound) {
               killPhp();
-              reject(new Error("PHP Server startup timed out (10s). Check antivirus or firewall."));
+              reject(new Error("PHP Server startup timed out. Check if a firewall is blocking PHP."));
           }
-      }, 10000);
+      }, 8000);
 
       const checkOutput = (data) => {
           const str = data.toString();
-          // Look for "Listening on http://127.0.0.1:XXXX"
-          const match = str.match(/Listening on http:\\/\\/127\\.0\\.0\\.1:(\\d+)/);
+          // FIX: Robust Regex matching. 
+          // Matches "http://127.0.0.1:XXXX" whether it says "Listening on" or "Development Server..."
+          const match = str.match(/http:\\/\\/127\\.0\\.0\\.1:(\\d+)/);
+          
           if (match && !portFound) {
               portFound = true;
               clearTimeout(timer);
@@ -906,11 +904,12 @@ async function startPhpServer() {
 
       phpProcess.stdout.on('data', checkOutput);
       phpProcess.stderr.on('data', checkOutput);
+      
       phpProcess.on('error', (err) => { clearTimeout(timer); reject(err); });
       phpProcess.on('close', (code) => { 
           if(!portFound) {
               clearTimeout(timer);
-              reject(new Error("PHP Exited unexpectedly with code " + code)); 
+              reject(new Error("PHP Exited unexpectedly (Code: " + code + ")")); 
           }
       });
 
@@ -921,11 +920,17 @@ async function startPhpServer() {
 function killPhp() {
   if (phpProcess) {
     try {
-        // Aggressive kill strategy to prevent locked files
+        // Soft kill first
         process.kill(phpProcess.pid);
-        // Ensure child processes (CGI/Workers) are also dead
-        execSync(\`taskkill /pid \${phpProcess.pid} /f /t\`);
     } catch(e) {}
+    
+    try {
+        // Aggressive force kill for Windows to release file locks
+        if (process.platform === 'win32') {
+             execSync(\`taskkill /pid \${phpProcess.pid} /f /t\`, { stdio: 'ignore' });
+        }
+    } catch(e) {}
+    
     phpProcess = null;
   }
   
@@ -999,9 +1004,7 @@ function createWindow() {
       mainWindow.hide();
       return; 
     }
-    
-    // If we are not closing to tray, we are actually closing.
-    // The 'window-all-closed' event will handle the quit.
+    // If not closing to tray, standard close event proceeds
   });
   
   if (CONFIG.contextMenu) {
@@ -1047,7 +1050,6 @@ else {
   });
   
   app.on('window-all-closed', () => { 
-      // Explicitly quit unless configured to run in background
       if (CONFIG.runBg && !isQuitting) {
           // Keep running
       } else {
@@ -1055,8 +1057,12 @@ else {
       }
   });
   
+  // Clean shutdown hooks
   app.on('before-quit', () => { isQuitting = true; killPhp(); });
-  app.on('will-quit', () => { killPhp(); }); // Double safety
+  app.on('will-quit', () => { killPhp(); });
 }
+
+// Ensure PHP is killed if the process crashes or exits unexpectedly
+process.on('exit', () => killPhp());
 `;
 }
