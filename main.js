@@ -1,9 +1,12 @@
+
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const https = require('https');
+const http = require('http'); // Added for http redirects
 const { exec, spawn } = require('child_process');
-const AdmZip = require('adm-zip'); // Requires: npm install adm-zip
+const AdmZip = require('adm-zip'); 
+const portfinder = require('portfinder');
 
 // --- UTILS ---
 
@@ -26,9 +29,19 @@ function copyFolderRecursiveSync(source, target) {
 
 function downloadFile(url, dest, onProgress) {
   return new Promise((resolve, reject) => {
-    const request = https.get(url, (response) => {
-      // Handle Redirects
-      if (response.statusCode === 301 || response.statusCode === 302) {
+    const uri = new URL(url);
+    const pkg = uri.protocol === 'https:' ? https : http;
+    
+    const options = {
+        headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+    };
+
+    const request = pkg.get(url, options, (response) => {
+      // Handle Redirects (301, 302, 303, 307, 308)
+      if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
+        console.log(`Redirecting to: ${response.headers.location}`);
         downloadFile(response.headers.location, dest, onProgress)
           .then(resolve)
           .catch(reject);
@@ -36,7 +49,7 @@ function downloadFile(url, dest, onProgress) {
       }
 
       if (response.statusCode !== 200) {
-        reject(new Error(`Failed to download (Status ${response.statusCode}) from ${url}`));
+        reject(new Error(`Failed to download. Status Code: ${response.statusCode} URL: ${url}`));
         return;
       }
 
@@ -56,7 +69,17 @@ function downloadFile(url, dest, onProgress) {
 
       response.on('end', () => {
         file.end();
-        resolve();
+        // Validate file size (PHP zips are usually > 20MB)
+        fs.stat(dest, (err, stats) => {
+            if (err) {
+                reject(err);
+            } else if (stats.size < 5 * 1024 * 1024) { // Less than 5MB is definitely suspicious
+                fs.unlink(dest, () => {});
+                reject(new Error("Downloaded file is too small/corrupt. (Likely an error page)"));
+            } else {
+                resolve();
+            }
+        });
       });
 
       response.on('error', (err) => {
@@ -84,18 +107,13 @@ async function extractZip(source, target) {
   });
 }
 
-/**
- * Recursively finds the directory containing php.exe
- */
 function findPhpBinaryDir(startDir) {
   const phpExe = process.platform === 'win32' ? 'php.exe' : 'php';
   
-  // Check current dir
   if (fs.existsSync(path.join(startDir, phpExe))) {
     return startDir;
   }
 
-  // Check subdirectories
   const files = fs.readdirSync(startDir);
   for (const file of files) {
     const fullPath = path.join(startDir, file);
@@ -120,7 +138,7 @@ async function verifyPhp(rootDir) {
   return new Promise((resolve, reject) => {
     exec(`"${phpPath}" -v`, (err, stdout) => {
       if (err) {
-        // Try to execute anyway, sometimes exit codes differ, but check stdout
+        // If exit code is non-zero but we get output, it might still work, but proceed with caution
         if (stdout && stdout.includes('PHP')) {
             resolve(actualPhpDir);
         } else {
@@ -188,52 +206,59 @@ ipcMain.handle('select-file', async (event, extensions) => {
 });
 
 ipcMain.handle('download-php', async (event, version) => {
-  try {
-    // Specific Filenames for versions
-    const filenames = {
+  const cacheDir = path.join(app.getPath('userData'), 'php-cache');
+  // Ensure cache dir exists
+  if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
+
+  // Specific Filenames for versions
+  const filenames = {
       '8.3': 'php-8.3.12-nts-Win32-vs16-x64.zip',
       '8.2': 'php-8.2.24-nts-Win32-vs16-x64.zip',
       '8.1': 'php-8.1.29-nts-Win32-vs16-x64.zip'
-    };
-    
-    const filename = filenames[version];
-    if (!filename) throw new Error('Unknown version selected');
+  };
+  
+  const filename = filenames[version];
+  if (!filename) return { success: false, error: 'Unknown version selected' };
 
-    // Smart URLs: Try Release, then Archive
+  const zipPath = path.join(cacheDir, filename);
+  const extractPath = path.join(cacheDir, `php-${version}`);
+
+  try {
+    // Smart URLs
     const primaryUrl = `https://windows.php.net/downloads/releases/${filename}`;
     const archiveUrl = `https://windows.php.net/downloads/releases/archives/${filename}`;
 
-    const cacheDir = path.join(app.getPath('userData'), 'php-cache');
-    if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
-
-    const zipPath = path.join(cacheDir, filename);
-    // Extract to a clean folder named just by version key (e.g. php-8.3)
-    const extractPath = path.join(cacheDir, `php-${version}`);
-
-    // 1. Download
-    // Check if zip exists and is valid (>1MB)
+    // 1. Download Logic
     let needsDownload = true;
-    if (fs.existsSync(zipPath) && fs.statSync(zipPath).size > 1000000) {
-        needsDownload = false;
+    
+    // Check if existing file is valid
+    if (fs.existsSync(zipPath)) {
+        const stats = fs.statSync(zipPath);
+        if (stats.size > 5000000) { // > 5MB
+            needsDownload = false;
+        } else {
+            // Found a corrupt/small file, delete it
+            fs.unlinkSync(zipPath);
+        }
     }
 
     if (needsDownload) {
        try {
-          mainWindow.webContents.send('download-progress', { percent: 0, status: 'Downloading from primary mirror...' });
+          mainWindow.webContents.send('download-progress', { percent: 0, status: 'Connecting to primary server...' });
           await downloadFile(primaryUrl, zipPath, (percent, current, total) => {
             mainWindow.webContents.send('download-progress', { percent, current, total, status: 'Downloading...' });
           });
        } catch (e) {
           console.log("Primary download failed, trying archive...", e.message);
-          mainWindow.webContents.send('download-progress', { percent: 0, status: 'Trying archive mirror...' });
+          mainWindow.webContents.send('download-progress', { percent: 0, status: 'Trying archive server...' });
           await downloadFile(archiveUrl, zipPath, (percent, current, total) => {
             mainWindow.webContents.send('download-progress', { percent, current, total, status: 'Downloading from archive...' });
           });
        }
     }
 
-    // 2. Extract
-    mainWindow.webContents.send('download-progress', { percent: 100, status: 'Extracting archive...' });
+    // 2. Extract Logic
+    mainWindow.webContents.send('download-progress', { percent: 100, status: 'Extracting files...' });
     
     // Clean previous extraction
     if (fs.existsSync(extractPath)) {
@@ -241,10 +266,16 @@ ipcMain.handle('download-php', async (event, version) => {
     }
     fs.mkdirSync(extractPath, { recursive: true });
 
-    await extractZip(zipPath, extractPath);
+    try {
+        await extractZip(zipPath, extractPath);
+    } catch (zipErr) {
+        // If extraction fails, the zip is likely corrupt. Delete it so next try re-downloads.
+        if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
+        throw new Error("Corrupt ZIP file detected and deleted. Please try again.");
+    }
 
-    // 3. Verify and Locate
-    mainWindow.webContents.send('download-progress', { percent: 100, status: 'Verifying installation...' });
+    // 3. Verify Logic
+    mainWindow.webContents.send('download-progress', { percent: 100, status: 'Verifying binary...' });
     const finalPath = await verifyPhp(extractPath);
 
     return { success: true, path: finalPath };
@@ -274,18 +305,20 @@ ipcMain.handle('generate-app', async (event, config) => {
        let extensionStr = '';
        extensionStr += `extension_dir = "ext"\n`;
        
-       config.phpExtensions.forEach(ext => {
-         extensionStr += `extension=php_${ext}.dll\n`;
-       });
+       if (config.phpExtensions && Array.isArray(config.phpExtensions)) {
+           config.phpExtensions.forEach(ext => {
+             extensionStr += `extension=php_${ext}.dll\n`;
+           });
+       }
 
        const phpIni = `
 [PHP]
 engine = On
 short_open_tag = On
-max_execution_time = ${config.phpTime}
-memory_limit = ${config.phpMemory}
-post_max_size = ${config.phpUpload}
-upload_max_filesize = ${config.phpUpload}
+max_execution_time = ${config.phpTime || 120}
+memory_limit = ${config.phpMemory || "256M"}
+post_max_size = ${config.phpUpload || "64M"}
+upload_max_filesize = ${config.phpUpload || "64M"}
 display_errors = Off
 log_errors = On
 error_log = php_errors.log
@@ -304,7 +337,7 @@ ${extensionStr}
     const packageJson = generatePackageJson(config);
     fs.writeFileSync(path.join(targetDir, 'package.json'), packageJson);
 
-    // 3. Generate main.js (The Electron Host logic)
+    // 3. Generate main.js
     const mainJs = generateMainJs(config);
     fs.writeFileSync(path.join(targetDir, 'main.js'), mainJs);
 
