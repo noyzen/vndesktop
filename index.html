@@ -42,7 +42,7 @@
         display: flex;
         height: 100vh;
         overflow: hidden;
-        user-select: none;
+        user-select: none; /* Global disable */
       }
 
       /* Scrollbars */
@@ -90,6 +90,7 @@
         width: 100%;
         box-sizing: border-box;
         transition: all 0.2s;
+        user-select: text; /* Allow input selection */
       }
       input:focus, select:focus, textarea:focus {
         outline: none;
@@ -287,9 +288,10 @@
         position: relative;
       }
       
-      .btn-delete-project i {
-        font-size: 18px;
-        color: #ef4444; 
+      .btn-delete-project svg {
+        width: 20px;
+        height: 20px;
+        fill: currentColor; /* Use color from parent */
         pointer-events: none; /* Ensure icon doesn't block click */
       }
       
@@ -298,10 +300,7 @@
         border-color: #ef4444;
         box-shadow: 0 0 15px rgba(239, 68, 68, 0.5);
         transform: scale(1.1);
-      }
-      
-      .btn-delete-project:hover i {
-          color: white;
+        color: white;
       }
 
       /* --- EDITOR VIEW --- */
@@ -455,18 +454,45 @@
       
       @keyframes button-spin { to { transform: rotate(360deg); } }
 
-      /* Console */
+      /* Console Container */
+      .console-wrapper {
+        position: relative;
+        margin-top: 20px;
+        border-radius: 8px;
+        overflow: hidden;
+        border: 1px solid var(--border);
+      }
+      
+      .console-header {
+        background: #111;
+        padding: 5px 10px;
+        border-bottom: 1px solid #333;
+        display: flex;
+        justify-content: flex-end;
+      }
+      
+      .btn-copy-log {
+        background: rgba(255,255,255,0.1);
+        border: none;
+        color: #aaa;
+        padding: 4px 10px;
+        font-size: 0.75rem;
+        border-radius: 4px;
+        cursor: pointer;
+      }
+      .btn-copy-log:hover { background: rgba(255,255,255,0.2); color: white; }
+
+      /* Console Output */
       .console {
         background: #050505;
-        border-top: 1px solid var(--border);
         height: 150px;
         padding: 15px;
         font-family: 'Consolas', monospace;
         font-size: 0.8rem;
         color: #ccc;
         overflow-y: auto;
-        margin-top: 20px;
-        border-radius: 8px;
+        user-select: text; /* CRITICAL: Allow text selection */
+        cursor: text;
       }
       .log-info { color: #60a5fa; margin-bottom: 4px; }
       .log-success { color: #4ade80; margin-bottom: 4px; }
@@ -729,8 +755,13 @@
                 </button>
             </div>
 
-            <div class="console" id="consoleOutput">
-                <div class="log-line">> VisualNEO Desk Ready.</div>
+            <div class="console-wrapper">
+                <div class="console-header">
+                    <button class="btn-copy-log" id="btnCopyLog"><i class="fa-solid fa-copy"></i> Copy Log</button>
+                </div>
+                <div class="console" id="consoleOutput">
+                    <div class="log-line">> VisualNEO Desk Ready.</div>
+                </div>
             </div>
         </div>
     </div>
