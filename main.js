@@ -2,7 +2,8 @@ const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const https = require('https');
-const { exec } = require('child_process');
+const { exec, spawn } = require('child_process');
+const AdmZip = require('adm-zip'); // Requires: npm install adm-zip
 
 // --- UTILS ---
 
@@ -35,7 +36,7 @@ function downloadFile(url, dest, onProgress) {
       }
 
       if (response.statusCode !== 200) {
-        reject(new Error(`Failed to download. Status Code: ${response.statusCode}`));
+        reject(new Error(`Failed to download (Status ${response.statusCode}) from ${url}`));
         return;
       }
 
@@ -71,43 +72,65 @@ function downloadFile(url, dest, onProgress) {
   });
 }
 
-function extractZip(source, target) {
+async function extractZip(source, target) {
   return new Promise((resolve, reject) => {
-    let command;
-    // Ensure target exists
-    if (!fs.existsSync(target)) fs.mkdirSync(target, { recursive: true });
-
-    if (process.platform === 'win32') {
-      // PowerShell unzip
-      command = `powershell -command "Expand-Archive -Path '${source}' -DestinationPath '${target}' -Force"`;
-    } else {
-      // Unix unzip
-      command = `unzip -o "${source}" -d "${target}"`;
+    try {
+      const zip = new AdmZip(source);
+      zip.extractAllTo(target, true); // overwrite = true
+      resolve();
+    } catch (e) {
+      reject(new Error("Extraction failed: " + e.message));
     }
-    
-    exec(command, (error, stdout, stderr) => {
-      if (error) {
-        reject(stderr || error.message);
-      } else {
-        resolve(stdout);
-      }
-    });
   });
 }
 
-async function verifyPhp(phpDir) {
+/**
+ * Recursively finds the directory containing php.exe
+ */
+function findPhpBinaryDir(startDir) {
   const phpExe = process.platform === 'win32' ? 'php.exe' : 'php';
-  const phpPath = path.join(phpDir, phpExe);
   
-  if (!fs.existsSync(phpPath)) {
-    throw new Error("Verification Failed: php.exe not found in extracted folder.");
+  // Check current dir
+  if (fs.existsSync(path.join(startDir, phpExe))) {
+    return startDir;
   }
+
+  // Check subdirectories
+  const files = fs.readdirSync(startDir);
+  for (const file of files) {
+    const fullPath = path.join(startDir, file);
+    if (fs.lstatSync(fullPath).isDirectory()) {
+      const found = findPhpBinaryDir(fullPath);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+async function verifyPhp(rootDir) {
+  const actualPhpDir = findPhpBinaryDir(rootDir);
+  
+  if (!actualPhpDir) {
+    throw new Error("Verification Failed: php.exe not found in extracted archive.");
+  }
+
+  const phpExe = process.platform === 'win32' ? 'php.exe' : 'php';
+  const phpPath = path.join(actualPhpDir, phpExe);
 
   return new Promise((resolve, reject) => {
     exec(`"${phpPath}" -v`, (err, stdout) => {
-      if (err) reject(new Error("Verification Failed: php executable is corrupt or incompatible."));
-      if (stdout.includes('PHP')) resolve(true);
-      else reject(new Error("Verification Failed: Unexpected output from PHP."));
+      if (err) {
+        // Try to execute anyway, sometimes exit codes differ, but check stdout
+        if (stdout && stdout.includes('PHP')) {
+            resolve(actualPhpDir);
+        } else {
+            reject(new Error("Verification Failed: php executable is corrupt or incompatible."));
+        }
+      } else if (stdout.includes('PHP')) {
+        resolve(actualPhpDir);
+      } else {
+        reject(new Error("Verification Failed: Unexpected output from PHP."));
+      }
     });
   });
 }
@@ -166,45 +189,68 @@ ipcMain.handle('select-file', async (event, extensions) => {
 
 ipcMain.handle('download-php', async (event, version) => {
   try {
-    // Updated Links (Checked for validity)
-    // We use specific versions that are currently stable. 
-    const versions = {
-      '8.3': 'https://windows.php.net/downloads/releases/php-8.3.12-nts-Win32-vs16-x64.zip',
-      '8.2': 'https://windows.php.net/downloads/releases/php-8.2.24-nts-Win32-vs16-x64.zip',
-      '8.1': 'https://windows.php.net/downloads/releases/archives/php-8.1.29-nts-Win32-vs16-x64.zip'
+    // Specific Filenames for versions
+    const filenames = {
+      '8.3': 'php-8.3.12-nts-Win32-vs16-x64.zip',
+      '8.2': 'php-8.2.24-nts-Win32-vs16-x64.zip',
+      '8.1': 'php-8.1.29-nts-Win32-vs16-x64.zip'
     };
+    
+    const filename = filenames[version];
+    if (!filename) throw new Error('Unknown version selected');
 
-    const url = versions[version];
-    if (!url) throw new Error('Version not found in catalog');
+    // Smart URLs: Try Release, then Archive
+    const primaryUrl = `https://windows.php.net/downloads/releases/${filename}`;
+    const archiveUrl = `https://windows.php.net/downloads/releases/archives/${filename}`;
 
     const cacheDir = path.join(app.getPath('userData'), 'php-cache');
     if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
 
-    const zipPath = path.join(cacheDir, `php-${version}.zip`);
+    const zipPath = path.join(cacheDir, filename);
+    // Extract to a clean folder named just by version key (e.g. php-8.3)
     const extractPath = path.join(cacheDir, `php-${version}`);
 
     // 1. Download
-    // Always re-download if file is small (corrupt) or doesn't exist
-    if (!fs.existsSync(zipPath) || fs.statSync(zipPath).size < 1000000) {
-       await downloadFile(url, zipPath, (percent, current, total) => {
-         mainWindow.webContents.send('download-progress', { percent, current, total, status: 'Downloading...' });
-       });
+    // Check if zip exists and is valid (>1MB)
+    let needsDownload = true;
+    if (fs.existsSync(zipPath) && fs.statSync(zipPath).size > 1000000) {
+        needsDownload = false;
+    }
+
+    if (needsDownload) {
+       try {
+          mainWindow.webContents.send('download-progress', { percent: 0, status: 'Downloading from primary mirror...' });
+          await downloadFile(primaryUrl, zipPath, (percent, current, total) => {
+            mainWindow.webContents.send('download-progress', { percent, current, total, status: 'Downloading...' });
+          });
+       } catch (e) {
+          console.log("Primary download failed, trying archive...", e.message);
+          mainWindow.webContents.send('download-progress', { percent: 0, status: 'Trying archive mirror...' });
+          await downloadFile(archiveUrl, zipPath, (percent, current, total) => {
+            mainWindow.webContents.send('download-progress', { percent, current, total, status: 'Downloading from archive...' });
+          });
+       }
     }
 
     // 2. Extract
     mainWindow.webContents.send('download-progress', { percent: 100, status: 'Extracting archive...' });
+    
+    // Clean previous extraction
     if (fs.existsSync(extractPath)) {
-      fs.rmSync(extractPath, { recursive: true, force: true });
+      try { fs.rmSync(extractPath, { recursive: true, force: true }); } catch(e) {}
     }
+    fs.mkdirSync(extractPath, { recursive: true });
+
     await extractZip(zipPath, extractPath);
 
-    // 3. Verify
+    // 3. Verify and Locate
     mainWindow.webContents.send('download-progress', { percent: 100, status: 'Verifying installation...' });
-    await verifyPhp(extractPath);
+    const finalPath = await verifyPhp(extractPath);
 
-    return { success: true, path: extractPath };
+    return { success: true, path: finalPath };
 
   } catch (error) {
+    console.error(error);
     return { success: false, error: error.message };
   }
 });
@@ -264,9 +310,9 @@ ${extensionStr}
 
     // 4. Generate Build Scripts
     const buildBat = `@echo off
-echo Installing...
+echo Installing Dependencies...
 call npm install
-echo Building...
+echo Building Application...
 call npm run build
 echo DONE!
 pause`;

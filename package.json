@@ -9,6 +9,10 @@
   },
   "author": "VisualNEO",
   "license": "MIT",
+  "dependencies": {
+    "adm-zip": "^0.5.10",
+    "portfinder": "^1.0.32"
+  },
   "devDependencies": {
     "electron": "^29.1.5",
     "electron-builder": "^24.13.3"
@@ -21,7 +25,8 @@
       "preload.js",
       "index.html",
       "renderer.js",
-      "public"
+      "public",
+      "node_modules/adm-zip/**/*"
     ],
     "win": {
       "target": [

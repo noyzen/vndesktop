@@ -1,3 +1,4 @@
+
 // Navigation Logic
 const tabs = document.querySelectorAll('.nav-item');
 const contents = document.querySelectorAll('.tab-content');
@@ -133,9 +134,9 @@ document.getElementById('btnDownloadPhp').addEventListener('click', async () => 
     
     if (result.success) {
       document.getElementById('phpPath').value = result.path;
-      log(`PHP ${version} installed & verified!`, 'success');
-      // Small timeout to ensure modal is gone before alerting
-      setTimeout(() => alert(`PHP ${version} downloaded, verified, and ready!`), 100);
+      log(`PHP ${version} installed successfully!`, 'success');
+      log(`Location: ${result.path}`, 'info');
+      setTimeout(() => alert(`PHP ${version} downloaded, verified, and linked!`), 100);
     } else {
       log(`Download Error: ${result.error}`, 'error');
       alert(`Error: ${result.error}`);
