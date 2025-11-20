@@ -15,14 +15,16 @@ async function deleteFolderRobust(targetPath, isBackground = false) {
     if (!fs.existsSync(targetPath)) return;
     
     const exists = () => fs.existsSync(targetPath);
-    const maxRetries = 5; 
+    const maxRetries = 8; 
     
     for (let i = 0; i < maxRetries; i++) {
         try {
             if (process.platform === 'win32') {
                 try {
+                    // Try fast deletion first
                     fs.rmSync(targetPath, { recursive: true, force: true });
                 } catch (err) {
+                    // Fallback to system command which can sometimes override locks
                     execSync(`rmdir /s /q "${targetPath}"`, { stdio: 'ignore' });
                 }
             } else {
@@ -32,7 +34,7 @@ async function deleteFolderRobust(targetPath, isBackground = false) {
             if (!exists()) return;
             
             // Exponential backoff
-            const delay = 300 * Math.pow(1.5, i);
+            const delay = 200 * Math.pow(1.5, i);
             await new Promise(resolve => setTimeout(resolve, delay));
 
         } catch (e) {
@@ -52,7 +54,6 @@ function forceMoveToTrash(targetPath) {
     const name = `trash_${path.basename(targetPath)}_${Date.now()}_${Math.floor(Math.random()*1000)}`;
     
     // Strategy 1: Rename in same parent dir (Atomic, Fast, bypasses cross-drive issues)
-    // We assume the build tool ignores folders starting with 'trash_' or we clean them later
     try {
         const parentDir = path.dirname(targetPath);
         const localDest = path.join(parentDir, `.${name}`); // Dot prefix to hide/ignore
@@ -70,6 +71,16 @@ function forceMoveToTrash(targetPath) {
 
 async function prepareDistFolder(buildDir, sendLog) {
     const distPath = path.join(buildDir, 'dist');
+    // Also clean any legacy trash in the build dir
+    try {
+        const files = fs.readdirSync(buildDir);
+        for (const f of files) {
+            if (f.startsWith('.trash_') || f.startsWith('trash_')) {
+                try { fs.rmSync(path.join(buildDir, f), { recursive: true, force: true }); } catch(e) {}
+            }
+        }
+    } catch(e) {}
+
     if (!fs.existsSync(distPath)) return true;
 
     sendLog("Cleaning output directory...");
@@ -78,11 +89,9 @@ async function prepareDistFolder(buildDir, sendLog) {
         await deleteFolderRobust(distPath);
         
         if (fs.existsSync(distPath)) {
-             // If it still exists after robust delete, force rename it
              const trashPath = forceMoveToTrash(distPath);
              
              if (fs.existsSync(distPath)) {
-                 // If STILL exists, we can't proceed
                  sendLog("Error: Output directory is locked by another process (Antivirus/Explorer).", true);
                  return false;
              }
@@ -102,7 +111,6 @@ function copyFolderRecursiveSync(source, target, exclusions = []) {
     const files = fs.readdirSync(source);
     files.forEach((file) => {
       if (exclusions.includes(file)) return;
-      // Also skip dotfiles created by our trash logic
       if (file.startsWith('.trash_')) return;
       
       const curSource = path.join(source, file);
@@ -561,7 +569,8 @@ ipcMain.handle('build-app', async (event, sourceRoot) => {
                 const execName = conf.productName + ".exe";
                 sendLog(`Checking for running instances of ${execName}...`);
                 try { 
-                    execSync(`taskkill /F /IM "${execName}"`, { stdio: 'ignore' }); 
+                    // Use windowsHide to prevent command prompt flash
+                    execSync(`taskkill /F /IM "${execName}"`, { stdio: 'ignore', windowsHide: true }); 
                     sendLog('Closed running application instance.'); 
                 } catch(e) {}
             }
@@ -616,7 +625,7 @@ ipcMain.handle('build-app', async (event, sourceRoot) => {
                             } catch(e) { sendLog('Cleanup warning: ' + e.message, false); resolve({ success: true }); }
                         }, 2000); 
                     });
-                }, 2000); // 2 Second delay
+                }, 3000); // Increased delay
             });
         });
     });
@@ -748,7 +757,8 @@ async function startPhpServer() {
       
       const checkOutput = (data) => {
           const str = data.toString();
-          const match = str.match(/http:\/\/(?:127\.0\.0\.1|localhost):(\d+)/i);
+          // Match http://127.0.0.1:1234 or http://localhost:1234
+          const match = str.match(/http:\\/\\/(?:127\\.0\\.0\\.1|localhost):(\\d+)/i);
           if (match && !portFound) { 
               portFound = true; 
               clearTimeout(timer); 
@@ -770,7 +780,7 @@ function killPhp() {
   if (phpProcess) {
     try { 
         if (process.platform === 'win32') {
-            execSync(\`taskkill /pid \${phpProcess.pid} /f /t\`, { stdio: 'ignore' });
+            execSync(\`taskkill /pid \${phpProcess.pid} /f /t\`, { stdio: 'ignore', windowsHide: true });
         } else {
             process.kill(phpProcess.pid);
         }
