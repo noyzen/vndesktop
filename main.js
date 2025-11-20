@@ -11,24 +11,57 @@ const portfinder = require('portfinder');
 // --- UTILS ---
 
 // Robust Delete Helper (Fixes ENOTEMPTY and Locked File issues)
-async function deleteFolderRobust(targetPath) {
+async function deleteFolderRobust(targetPath, isBackground = false) {
     if (!fs.existsSync(targetPath)) return;
     
-    const maxRetries = 10;
+    const maxRetries = 15; // Increased retries
     for (let i = 0; i < maxRetries; i++) {
         try {
             fs.rmSync(targetPath, { recursive: true, force: true });
             return; // Success
         } catch (e) {
             if (i === maxRetries - 1) {
-                console.error(`Failed to delete ${targetPath} after retries: ${e.message}`);
-                // Don't throw, let the caller decide if this is fatal, but usually it is.
-                throw e;
+                if (!isBackground) console.error(`Failed to delete ${targetPath}: ${e.message}`);
+                if (!isBackground) throw e;
             } else {
-                // Exponential backoff: 100, 200, 400, 800...
-                const delay = 100 * Math.pow(2, i);
+                // Exponential backoff: 50, 100, 200, 400... up to ~1.5s waits
+                const delay = 50 * Math.pow(1.5, i);
                 await new Promise(resolve => setTimeout(resolve, delay));
             }
+        }
+    }
+}
+
+// Clever "Move to Trash" strategy for build folders
+// If we can't delete 'dist', we rename it to 'dist_old_TIMESTAMP' so the build can proceed.
+// We attempt to delete the trash later, but if it fails, it doesn't block the user.
+async function prepareDistFolder(buildDir, sendLog) {
+    const distPath = path.join(buildDir, 'dist');
+    if (!fs.existsSync(distPath)) return true;
+
+    sendLog("Cleaning output directory...");
+
+    try {
+        // Try standard delete first
+        await deleteFolderRobust(distPath);
+        return true;
+    } catch (e) {
+        sendLog("Standard clean failed (Locked). Attempting displacement strategy...");
+        
+        // Strategy: Rename
+        const trashName = `dist_trash_${Date.now()}`;
+        const trashPath = path.join(buildDir, trashName);
+        
+        try {
+            fs.renameSync(distPath, trashPath);
+            sendLog(`Moved locked folder to ${trashName}. Build path is clear.`);
+            
+            // Fire and forget delete of the trash
+            deleteFolderRobust(trashPath, true).catch(() => {});
+            return true;
+        } catch (renameErr) {
+            sendLog(`Critical: Could not move locked folder. Error: ${renameErr.message}`, true);
+            return false;
         }
     }
 }
@@ -507,8 +540,7 @@ ipcMain.handle('generate-app', async (event, config) => {
     const wwwDir = path.join(buildDir, 'www');
     const binDir = path.join(buildDir, 'bin');
     
-    // Note: We do NOT delete dist here immediately, the build command handles it.
-    // But we do clean intermediate folders.
+    // Clean intermediate folders but NOT dist yet
     if (!fs.existsSync(buildDir)) fs.mkdirSync(buildDir, { recursive: true });
     
     await deleteFolderRobust(wwwDir);
@@ -583,39 +615,32 @@ ipcMain.handle('build-app', async (event, sourceRoot) => {
             return resolve({ success: false, error: 'vnbuild not found. Generate config first.' });
         }
 
-        // --- PRE-BUILD CLEANUP & SAFETY ---
-        // 1. Identify executable name to kill any running instances
+        // --- STEP 1: KILL RUNNING INSTANCES ---
         try {
             const configFile = path.join(buildDir, 'visualneo.json');
             if (fs.existsSync(configFile)) {
                 const conf = JSON.parse(fs.readFileSync(configFile, 'utf8'));
                 const execName = conf.productName + ".exe";
                 sendLog(`Checking for running instances of ${execName}...`);
-                // Force kill any running instances of the app we are about to build
                 try {
                     execSync(`taskkill /F /IM "${execName}"`, { stdio: 'ignore' });
                     sendLog('Closed running application instance.');
                 } catch(e) { 
-                    // Ignore error if process wasn't running
+                    // Process was not running, safe to proceed
                 }
             }
         } catch(e) {
-            sendLog('Warning: Could not check for running instances.', true);
+            sendLog('Warning: Instance check skipped.', true);
         }
 
-        // 2. Aggressively Clean DIST
-        const distPath = path.join(buildDir, 'dist');
-        if (fs.existsSync(distPath)) {
-            sendLog('Cleaning previous build artifacts...');
-            try {
-                await deleteFolderRobust(distPath);
-            } catch(e) {
-                sendLog(`Error cleaning dist folder: ${e.message}. Files might be locked.`, true);
-                return resolve({ success: false, error: 'Files Locked' });
-            }
+        // --- STEP 2: PREPARE DIST (RENAME STRATEGY) ---
+        // This is the fix for ENOTEMPTY / Locked Files
+        const distCleaned = await prepareDistFolder(buildDir, sendLog);
+        if (!distCleaned) {
+            return resolve({ success: false, error: 'Output folder is locked by System/Antivirus.' });
         }
         
-        // --- BUILD START ---
+        // --- STEP 3: BUILD START ---
         const buildEnv = getBuildEnv();
         const localPath = getLocalNodePath();
         
@@ -652,10 +677,10 @@ ipcMain.handle('build-app', async (event, sourceRoot) => {
                         return resolve({ success: false, error: 'Build failed' });
                     }
 
-                    // --- CLEANUP DIST FOLDER ROBUSTNESS ---
+                    // --- CLEANUP ---
                     setTimeout(async () => {
                         try {
-                            sendLog('Cleaning up output artifacts...');
+                            sendLog('Performing final cleanup...');
                             const configFile = path.join(buildDir, 'visualneo.json');
                             const distPath = path.join(buildDir, 'dist');
                             const junkExtensions = ['.yml', '.yaml', '.blockmap'];
@@ -667,10 +692,13 @@ ipcMain.handle('build-app', async (event, sourceRoot) => {
                                 const files = fs.readdirSync(distPath);
                                 for (const f of files) {
                                     const fullPath = path.join(distPath, f);
+                                    // Remove builder metadata files
                                     if (junkExtensions.some(ext => f.endsWith(ext))) {
                                         try { fs.rmSync(fullPath, { force: true }); } catch(e) {}
                                     }
+                                    // Remove unpacked folder if user didn't request it
                                     if (f === 'win-unpacked' && !config.targetUnpacked) {
+                                        // Use displacement strategy here too if needed, but robust delete usually fine
                                         await deleteFolderRobust(fullPath);
                                     }
                                 }
@@ -679,10 +707,10 @@ ipcMain.handle('build-app', async (event, sourceRoot) => {
                             sendLog('Build Success!');
                             resolve({ success: true });
                         } catch(e) {
-                            sendLog('Cleanup warning: ' + e.message, false);
+                            sendLog('Cleanup warning (minor): ' + e.message, false);
                             resolve({ success: true });
                         }
-                    }, 2000);
+                    }, 1500);
                 });
             });
         });
@@ -758,7 +786,7 @@ let mainWindow, tray = null, isQuitting = false, phpProcess = null, serverUrl = 
 const isDev = !app.isPackaged;
 const appDataDir = app.getPath('userData');
 const tempDir = app.getPath('temp');
-const instanceId = 'vneo-' + Date.now();
+const instanceId = 'vneo-' + Date.now() + '-' + Math.floor(Math.random() * 1000);
 const resourcesDir = isDev ? path.join(__dirname, 'bin') : process.resourcesPath;
 
 function syncDir(src, dest) {
@@ -792,7 +820,8 @@ async function setupEnvironment() {
     if (CONFIG.dataMode === 'writable') {
         runtimeRoot = path.join(appDataDir, 'server_root');
     } else {
-        runtimeRoot = path.join(tempDir, CONFIG.title.replace(/\\W/g,''), instanceId);
+        // Unique path for every instance in static mode to prevent collision
+        runtimeRoot = path.join(tempDir, CONFIG.title.replace(/[^a-zA-Z0-9]/g,''), instanceId);
     }
 
     const phpSource = path.join(resourcesDir, 'php');
@@ -820,6 +849,7 @@ async function startPhpServer() {
 
       if (!fs.existsSync(phpExe)) return reject(new Error("PHP.exe not found at: " + phpExe));
 
+      // Port 0 = OS assigns free port. Robust for multiple instances.
       phpProcess = spawn(phpExe, ['-S', '127.0.0.1:0', '-t', env.docRoot, '-c', phpIni], {
         cwd: env.docRoot,
         windowsHide: true
@@ -828,6 +858,7 @@ async function startPhpServer() {
       let portFound = false;
       const checkOutput = (data) => {
           const str = data.toString();
+          // Look for "Listening on http://127.0.0.1:XXXX"
           const match = str.match(/Listening on http:\\/\\/127\\.0\\.0\\.1:(\\d+)/);
           if (match && !portFound) {
               portFound = true;
@@ -848,9 +879,17 @@ async function startPhpServer() {
 function killPhp() {
   if (phpProcess) {
     try {
+        // Force kill process tree
         execSync(\`taskkill /pid \${phpProcess.pid} /f /t\`);
     } catch(e) {}
     phpProcess = null;
+  }
+  // Also try to clean up temp dir if in static mode
+  if (CONFIG.dataMode === 'static') {
+      try { 
+          const tempRoot = path.join(tempDir, CONFIG.title.replace(/[^a-zA-Z0-9]/g,''), instanceId);
+          if(fs.existsSync(tempRoot)) fs.rmSync(tempRoot, { recursive: true, force: true });
+      } catch(e) {}
   }
 }
 
