@@ -4,11 +4,32 @@ const path = require('path');
 const fs = require('fs');
 const https = require('https');
 const http = require('http');
-const { exec, spawn } = require('child_process');
+const { exec, spawn, execSync } = require('child_process');
 const AdmZip = require('adm-zip'); 
 const portfinder = require('portfinder');
 
 // --- UTILS ---
+
+// Robust Delete Helper (Fixes ENOTEMPTY and Locked File issues)
+async function deleteFolderRobust(targetPath) {
+    if (!fs.existsSync(targetPath)) return;
+    
+    const maxRetries = 5;
+    for (let i = 0; i < maxRetries; i++) {
+        try {
+            fs.rmSync(targetPath, { recursive: true, force: true });
+            return; // Success
+        } catch (e) {
+            if (i === maxRetries - 1) {
+                console.error(`Failed to delete ${targetPath} after retries: ${e.message}`);
+                // We don't throw here to allow the process to continue, but we log it.
+            } else {
+                // Wait 500ms before retry
+                await new Promise(resolve => setTimeout(resolve, 500));
+            }
+        }
+    }
+}
 
 function copyFolderRecursiveSync(source, target, exclusions = []) {
   if (!fs.existsSync(target)) fs.mkdirSync(target, { recursive: true });
@@ -408,7 +429,7 @@ ipcMain.handle('download-php', async (event, version) => {
     }
 
     mainWindow.webContents.send('download-progress', { percent: 100, status: 'Extracting...' });
-    if (fs.existsSync(extractPath)) fs.rmSync(extractPath, { recursive: true, force: true });
+    if (fs.existsSync(extractPath)) await deleteFolderRobust(extractPath);
     fs.mkdirSync(extractPath, { recursive: true });
 
     await extractZip(zipPath, extractPath);
@@ -465,7 +486,7 @@ ipcMain.handle('install-node', async () => {
         // Clean old
         const items = fs.readdirSync(nodeDir);
         for(const i of items) {
-            if(i !== filename) fs.rmSync(path.join(nodeDir, i), { recursive: true, force: true });
+            if(i !== filename) await deleteFolderRobust(path.join(nodeDir, i));
         }
         
         await extractZip(zipPath, nodeDir);
@@ -493,10 +514,10 @@ ipcMain.handle('generate-app', async (event, config) => {
     
     if (!fs.existsSync(buildDir)) fs.mkdirSync(buildDir, { recursive: true });
     
-    // Clean previous build files
-    if (fs.existsSync(wwwDir)) fs.rmSync(wwwDir, { recursive: true, force: true });
-    if (fs.existsSync(binDir)) fs.rmSync(binDir, { recursive: true, force: true });
-    if (fs.existsSync(distDir)) fs.rmSync(distDir, { recursive: true, force: true });
+    // Clean previous build files with robust deletion
+    await deleteFolderRobust(wwwDir);
+    await deleteFolderRobust(binDir);
+    await deleteFolderRobust(distDir);
 
     const exclusions = ['vnbuild', '.git', '.vscode', 'node_modules', 'dist', 'release', 'out'];
     fs.mkdirSync(wwwDir, { recursive: true });
@@ -605,7 +626,8 @@ ipcMain.handle('build-app', async (event, sourceRoot) => {
                     }
 
                     // --- CLEANUP DIST FOLDER ROBUSTNESS ---
-                    setTimeout(() => {
+                    // We delay slightly to allow file handles to release
+                    setTimeout(async () => {
                         try {
                             sendLog('Cleaning up output artifacts...');
                             const configFile = path.join(buildDir, 'visualneo.json');
@@ -617,7 +639,7 @@ ipcMain.handle('build-app', async (event, sourceRoot) => {
 
                             if (fs.existsSync(distPath)) {
                                 const files = fs.readdirSync(distPath);
-                                files.forEach(f => {
+                                for (const f of files) {
                                     const fullPath = path.join(distPath, f);
                                     
                                     // 1. Remove Debug/Update metadata files
@@ -627,14 +649,10 @@ ipcMain.handle('build-app', async (event, sourceRoot) => {
 
                                     // 2. Remove unpacked folder if not requested
                                     if (f === 'win-unpacked' && !config.targetUnpacked) {
-                                        try {
-                                            // Retry logic for locked files
-                                            fs.rmSync(fullPath, { recursive: true, force: true });
-                                        } catch (e) {
-                                            sendLog('Warning: Could not fully remove unpacked folder (File Locked).', false);
-                                        }
+                                        // Use robust delete here
+                                        await deleteFolderRobust(fullPath);
                                     }
-                                });
+                                }
                             }
                             
                             sendLog('Build Success!');
@@ -706,7 +724,7 @@ function generateMainJs(c) {
   return `const { app, BrowserWindow, Tray, Menu, ipcMain, shell, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { spawn } = require('child_process');
+const { spawn, execSync } = require('child_process');
 
 // --- CONFIGURATION ---
 const CONFIG = {
@@ -791,10 +809,6 @@ async function setupEnvironment() {
     // Extract/Update files
     try {
         syncDir(wwwSource, runtimeRoot);
-        // Copy PHP config only if needed, usually we point PHP to the resources binary directly
-        // But to allow php.ini edits at runtime, we could copy it. 
-        // For now, we run PHP directly from resources to save time/space, 
-        // BUT we set the docRoot to the extracted WWW.
     } catch (e) {
         console.error("Setup Error", e);
     }
@@ -841,7 +855,12 @@ async function startPhpServer() {
 
 function killPhp() {
   if (phpProcess) {
-    spawn("taskkill", ["/pid", phpProcess.pid, '/f', '/t']);
+    try {
+        // Force kill using Taskkill (Blocking) to ensure no leftovers
+        execSync(\`taskkill /pid \${phpProcess.pid} /f /t\`);
+    } catch(e) {
+        // Process might already be dead
+    }
     phpProcess = null;
   }
 }

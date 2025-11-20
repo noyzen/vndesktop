@@ -3,7 +3,7 @@
 <html>
 <head>
     <meta charset="UTF-8" />
-    <title>VisualNEO Desktop Builder</title>
+    <title>VisualNEO Desk</title>
     <meta http-equiv="Content-Security-Policy" content="script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com https://fonts.googleapis.com;" />
     <link rel="stylesheet" href="./public/fonts/all.min.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -275,6 +275,7 @@
         border: 1px solid rgba(239, 68, 68, 0.2);
         width: 45px;
         height: 45px;
+        min-width: 45px; /* Force width */
         padding: 0;
         border-radius: 12px;
         display: flex;
@@ -283,11 +284,13 @@
         transition: all 0.2s;
         cursor: pointer;
         z-index: 5;
+        position: relative;
       }
       
       .btn-delete-project i {
         font-size: 18px;
         color: #ef4444; 
+        pointer-events: none; /* Ensure icon doesn't block click */
       }
       
       .btn-delete-project:hover {
@@ -513,7 +516,7 @@
     <div id="view-manager" class="view-section">
         <div class="pm-container">
             <div class="pm-hero">
-                <div class="pm-logo">VisualNEO</div>
+                <div class="pm-logo">VisualNEO Desk</div>
                 <div class="pm-subtitle">Professional Desktop Application Compiler</div>
                 <button class="pm-btn-new" id="btnNewProject">
                     <i class="fa-solid fa-plus"></i> Create New Project
@@ -530,7 +533,7 @@
     <div id="view-editor" class="view-section hidden">
         <div class="sidebar">
             <div class="sidebar-brand">
-                <i class="fa-solid fa-cube"></i> VisualNEO
+                <i class="fa-solid fa-cube"></i> VisualNEO Desk
             </div>
             <div class="nav-item active" data-tab="project"><i class="fa-solid fa-code"></i> Project Source</div>
             <div class="nav-item" data-tab="window"><i class="fa-solid fa-window-maximize"></i> Window & UI</div>
@@ -727,7 +730,7 @@
             </div>
 
             <div class="console" id="consoleOutput">
-                <div class="log-line">> VisualNEO Ready.</div>
+                <div class="log-line">> VisualNEO Desk Ready.</div>
             </div>
         </div>
     </div>

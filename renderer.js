@@ -115,8 +115,8 @@ async function openProject(path) {
         log(`Loaded project: ${config.appName}`);
     } else {
         // Defaults
-        document.getElementById('productName').value = path.split(/[\\/]/).pop();
-        document.getElementById('appName').value = 'com.myapp.' + Date.now();
+        document.getElementById('productName').value = 'VisualNEO Desk Project';
+        document.getElementById('appName').value = 'com.visualneodesk.' + Date.now();
         log('Initialized new project config');
     }
     
@@ -207,7 +207,7 @@ function renderExtensions() {
 // --- FORM HANDLING ---
 
 function resetForm() {
-    document.getElementById('productName').value = 'My App';
+    document.getElementById('productName').value = 'VisualNEO Desk Project';
     document.getElementById('appName').value = '';
     document.getElementById('appVersion').value = '1.0.0';
     document.getElementById('appAuthor').value = '';
