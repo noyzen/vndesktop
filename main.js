@@ -10,16 +10,18 @@ const portfinder = require('portfinder');
 
 // --- UTILS ---
 
-function copyFolderRecursiveSync(source, target) {
+function copyFolderRecursiveSync(source, target, excludeName) {
   if (!fs.existsSync(target)) fs.mkdirSync(target, { recursive: true });
 
   if (fs.lstatSync(source).isDirectory()) {
     const files = fs.readdirSync(source);
     files.forEach((file) => {
+      if (excludeName && file === excludeName) return;
+
       const curSource = path.join(source, file);
       const curTarget = path.join(target, file);
       if (fs.lstatSync(curSource).isDirectory()) {
-        copyFolderRecursiveSync(curSource, curTarget);
+        copyFolderRecursiveSync(curSource, curTarget, excludeName);
       } else {
         fs.copyFileSync(curSource, curTarget);
       }
@@ -304,14 +306,26 @@ ipcMain.handle('download-php', async (event, version) => {
 
 ipcMain.handle('generate-app', async (event, config) => {
   try {
-    const targetDir = config.sourcePath;
+    const sourceRoot = config.sourcePath;
+    const buildDir = path.join(sourceRoot, 'vnbuild');
+    const wwwDir = path.join(buildDir, 'www');
     
+    // Create build directories
+    if (!fs.existsSync(buildDir)) fs.mkdirSync(buildDir, { recursive: true });
+    
+    // Clean www and bin to ensure freshness, but keep node_modules
+    if (fs.existsSync(wwwDir)) fs.rmSync(wwwDir, { recursive: true, force: true });
+    const binDir = path.join(buildDir, 'bin');
+    if (fs.existsSync(binDir)) fs.rmSync(binDir, { recursive: true, force: true });
+
+    // Copy project files to vnbuild/www (excluding vnbuild itself to avoid recursion)
+    fs.mkdirSync(wwwDir, { recursive: true });
+    copyFolderRecursiveSync(sourceRoot, wwwDir, 'vnbuild');
+
+    // Handle PHP
     if (config.enablePhp && config.phpPath) {
-       const phpDest = path.join(targetDir, 'bin', 'php');
-       if (fs.existsSync(phpDest)) {
-         fs.rmSync(phpDest, { recursive: true, force: true });
-       }
-       fs.mkdirSync(path.join(targetDir, 'bin'), { recursive: true });
+       const phpDest = path.join(binDir, 'php');
+       fs.mkdirSync(path.join(buildDir, 'bin'), { recursive: true });
        
        copyFolderRecursiveSync(config.phpPath, phpDest);
        
@@ -346,12 +360,14 @@ ${extensionStr}
        fs.writeFileSync(path.join(phpDest, 'php.ini'), phpIni);
     }
 
+    // Generate configuration files inside vnbuild
     const packageJson = generatePackageJson(config);
-    fs.writeFileSync(path.join(targetDir, 'package.json'), packageJson);
+    fs.writeFileSync(path.join(buildDir, 'package.json'), packageJson);
 
     const mainJs = generateMainJs(config);
-    fs.writeFileSync(path.join(targetDir, 'main.js'), mainJs);
+    fs.writeFileSync(path.join(buildDir, 'main.js'), mainJs);
 
+    // Create helper scripts inside vnbuild
     const buildBat = `@echo off
 echo Installing Dependencies...
 call npm install
@@ -359,12 +375,7 @@ echo Building Application...
 call npm run build
 echo DONE!
 pause`;
-    fs.writeFileSync(path.join(targetDir, 'build.bat'), buildBat);
-    
-    const buildSh = `#!/bin/bash
-npm install
-npm run build`;
-    fs.writeFileSync(path.join(targetDir, 'build.sh'), buildSh);
+    fs.writeFileSync(path.join(buildDir, 'build.bat'), buildBat);
 
     return { success: true };
   } catch (error) {
@@ -374,10 +385,11 @@ npm run build`;
 });
 
 // --- BUILD COMMAND HANDLER ---
-ipcMain.handle('build-app', async (event, targetDir) => {
+ipcMain.handle('build-app', async (event, sourceRoot) => {
     return new Promise((resolve, reject) => {
         const isWin = process.platform === 'win32';
         const npmCmd = isWin ? 'npm.cmd' : 'npm';
+        const buildDir = path.join(sourceRoot, 'vnbuild');
         
         // Helper to send log
         const sendLog = (msg, isError = false) => {
@@ -388,6 +400,11 @@ ipcMain.handle('build-app', async (event, targetDir) => {
             });
         };
 
+        if (!fs.existsSync(buildDir)) {
+            sendLog('Build directory "vnbuild" not found. Please Generate Config first.', true);
+            return resolve({ success: false, error: 'vnbuild not found' });
+        }
+
         // 1. Check NPM
         exec(`${npmCmd} -v`, (err) => {
             if (err) {
@@ -396,9 +413,9 @@ ipcMain.handle('build-app', async (event, targetDir) => {
                 return resolve({ success: false, error: 'NPM not found' });
             }
 
-            // 2. NPM Install
-            sendLog('Running "npm install"... this may take a minute.');
-            const install = spawn(npmCmd, ['install'], { cwd: targetDir, shell: true });
+            // 2. NPM Install inside vnbuild
+            sendLog(`Running "npm install" in ${buildDir}...`);
+            const install = spawn(npmCmd, ['install'], { cwd: buildDir, shell: true });
 
             install.stdout.on('data', (data) => sendLog(data.toString()));
             install.stderr.on('data', (data) => sendLog(data.toString()));
@@ -411,8 +428,8 @@ ipcMain.handle('build-app', async (event, targetDir) => {
                 
                 sendLog('"npm install" completed. Starting build...');
                 
-                // 3. NPM Run Build
-                const build = spawn(npmCmd, ['run', 'build'], { cwd: targetDir, shell: true });
+                // 3. NPM Run Build inside vnbuild
+                const build = spawn(npmCmd, ['run', 'build'], { cwd: buildDir, shell: true });
                 
                 build.stdout.on('data', (data) => sendLog(data.toString()));
                 build.stderr.on('data', (data) => sendLog(data.toString())); // warnings often come in stderr
@@ -441,6 +458,7 @@ function generatePackageJson(c) {
 
   const extraResources = [];
   if (c.enablePhp) {
+    // Path relative to vnbuild/package.json
     extraResources.push({
       "from": "bin/php",
       "to": "php",
@@ -451,10 +469,10 @@ function generatePackageJson(c) {
   const buildConfig = {
     appId: `com.visualneo.${c.appName.replace(/\s+/g, '').toLowerCase()}`,
     productName: c.productName,
+    // Explicitly include main.js and the www folder content
     files: [
-      "**/*",
-      "!bin",
-      "!**/*.map"
+      "main.js",
+      "www/**/*"
     ],
     extraResources: extraResources,
     directories: { "output": "dist" },
@@ -528,6 +546,9 @@ let isQuitting = false;
 let phpProcess = null;
 let serverUrl = null;
 
+// Correctly resolve web root whether packaged or running in vnbuild dev mode
+const webRoot = path.join(__dirname, 'www');
+
 const statePath = path.join(app.getPath('userData'), 'window-state.json');
 
 function loadState() {
@@ -559,15 +580,25 @@ async function startPhpServer() {
       
       let phpBin = '';
       if (app.isPackaged) {
+        // Production: resources/php/php.exe
         phpBin = path.join(process.resourcesPath, 'php', 'php.exe');
       } else {
+        // Dev (vnbuild): bin/php/php.exe
         phpBin = path.join(__dirname, 'bin', 'php', 'php.exe');
       }
       
-      const webRoot = app.isPackaged ? path.join(process.resourcesPath, 'app') : __dirname;
+      // Check if PHP exists to prevent spawn ENOENT crash
+      if (!fs.existsSync(phpBin)) {
+         console.error("PHP Binary not found at: " + phpBin);
+         // Fallback for debugging or corrupted builds
+         reject(new Error("PHP binary missing."));
+         return;
+      }
+      
       const iniPath = path.join(path.dirname(phpBin), 'php.ini');
 
       console.log("Starting PHP on port " + port);
+      console.log("Document Root: " + webRoot);
       
       phpProcess = spawn(phpBin, ['-S', '127.0.0.1:' + port, '-t', webRoot, '-c', iniPath], {
         cwd: webRoot
@@ -633,7 +664,8 @@ function createWindow() {
   } else if (CONFIG.entry.startsWith('http')) {
     mainWindow.loadURL(CONFIG.entry);
   } else {
-    mainWindow.loadFile(CONFIG.entry);
+    // Use webRoot for static files
+    mainWindow.loadFile(path.join(webRoot, CONFIG.entry));
   }
 
   ${c.userAgent ? `mainWindow.webContents.setUserAgent("${c.userAgent}");` : ''}
@@ -675,7 +707,12 @@ function createTray() {
   const iconName = ${c.iconPath ? `'${path.basename(c.iconPath)}'` : `'appicon.png'`};
   
   try {
-     const trayIconPath = path.join(__dirname, iconName);
+     // Icon is expected in root (next to main.js) or resources
+     let trayIconPath = path.join(__dirname, iconName);
+     if (!fs.existsSync(trayIconPath) && app.isPackaged) {
+         trayIconPath = path.join(process.resourcesPath, iconName);
+     }
+     
      tray = new Tray(trayIconPath);
      
      const contextMenu = Menu.buildFromTemplate([
