@@ -21,7 +21,6 @@ const btnCloseSuccess = document.getElementById('btnCloseSuccess');
 // Navigation
 const tabs = document.querySelectorAll('.nav-item');
 const contents = document.querySelectorAll('.tab-content');
-const headerTitle = document.getElementById('header-title');
 
 // PHP Controls
 const phpToggle = document.getElementById('enablePhp');
@@ -36,7 +35,7 @@ const cardWritable = document.getElementById('card-writable');
 // State
 let currentProjectPath = null;
 let selectedExtensions = new Set(['php_curl.dll', 'php_gd.dll', 'php_mbstring.dll', 'php_sqlite3.dll', 'php_openssl.dll', 'php_pdo_sqlite.dll']);
-let availableExtensions = []; // Loaded from backend
+let availableExtensions = []; 
 let phpCache = {};
 
 // --- UI HELPERS ---
@@ -61,13 +60,11 @@ function log(msg, type = 'info') {
     div.className = `log-line log-${type}`;
     div.innerText = `> ${msg}`;
     consoleOutput.appendChild(div);
-    // Auto scroll
     requestAnimationFrame(() => {
         consoleOutput.scrollTop = consoleOutput.scrollHeight;
     });
 }
 
-// Copy Log Functionality
 document.getElementById('btnCopyLog').onclick = async () => {
     const text = document.getElementById('consoleOutput').innerText;
     await window.api.copyToClipboard(text);
@@ -80,7 +77,6 @@ document.getElementById('btnCopyLog').onclick = async () => {
 // --- STARTUP & DEPENDENCY CHECK ---
 
 async function initApp() {
-    // Reset Boot UI
     bootActionArea.innerHTML = '';
     bootProgress.style.display = 'none';
     bootStatusNode.className = 'boot-item-status status-loading';
@@ -88,18 +84,16 @@ async function initApp() {
     bootStatusNpm.className = 'boot-item-status status-loading';
     bootStatusNpm.innerText = 'Checking...';
 
-    // 1. Check PHP Cache (Background)
     window.api.getPhpCache().then(c => phpCache = c);
 
-    // 2. Check Node
-    // Small delay to allow UI to render (animation)
+    // Artificial delay for UX
     await new Promise(r => setTimeout(r, 600));
     
     const nodeCheck = await window.api.checkNode();
     
     if(nodeCheck.installed) {
         bootStatusNode.className = 'boot-item-status status-ok';
-        bootStatusNode.innerText = nodeCheck.nodeVersion + (nodeCheck.local ? ' (Portable)' : ' (Global)');
+        bootStatusNode.innerText = nodeCheck.nodeVersion + (nodeCheck.local ? ' (Portable)' : ' (System)');
         
         if(nodeCheck.npmVersion) {
             bootStatusNpm.className = 'boot-item-status status-ok';
@@ -109,21 +103,18 @@ async function initApp() {
              bootStatusNpm.innerText = 'Not Found';
         }
 
-        // Success - Proceed
-        bootActionArea.innerHTML = '<div style="color:#4ade80; font-weight:600;">System Ready</div>';
+        bootActionArea.innerHTML = '<div style="color:#4ade80; font-weight:600; animation: fadeIn 0.5s;">System Verified</div>';
         setTimeout(() => {
             showManager();
         }, 1200);
     } else {
-        // Missing
         bootStatusNode.className = 'boot-item-status status-err';
         bootStatusNode.innerText = 'Not Installed';
         bootStatusNpm.className = 'boot-item-status status-err';
         bootStatusNpm.innerText = 'Not Installed';
 
-        // Show Install Button
         const btn = document.createElement('button');
-        btn.innerHTML = '<i class="fa-brands fa-node-js"></i> Auto-Install Node.js LTS';
+        btn.innerHTML = '<i class="fa-brands fa-node-js"></i> Auto-Install Node.js LTS (v22)';
         btn.onclick = performAutoInstall;
         bootActionArea.innerHTML = '';
         bootActionArea.appendChild(btn);
@@ -138,10 +129,9 @@ async function performAutoInstall() {
     
     if(result.success) {
         bootActionArea.innerHTML = '<div style="color:#4ade80; font-weight:600;">Installation Complete!</div>';
-        setTimeout(initApp, 1000); // Re-run check to verify and proceed
+        setTimeout(initApp, 1000); 
     } else {
         bootActionArea.innerHTML = `<div style="color:#f87171;">Error: ${result.error}</div>`;
-        // Allow retry
         const btn = document.createElement('button');
         btn.innerText = "Retry";
         btn.style.marginTop = "10px";
@@ -150,22 +140,17 @@ async function performAutoInstall() {
     }
 }
 
-// Listen for install progress
 window.api.onDownloadProgress((data) => {
-    // Handle Build Logs separately
     if(data.type === 'build-log') {
         log(data.msg, data.error ? 'error' : 'info');
         return;
     }
-    
-    // Handle Boot Install Progress
     if(viewBoot.classList.contains('hidden') === false) {
         const p = Math.round(data.percent);
         bootProgressFill.style.width = `${p}%`;
         bootProgressText.innerText = data.status || `${p}%`;
     }
 });
-
 
 // --- PROJECT MANAGER ---
 
@@ -182,8 +167,7 @@ async function renderProjectList() {
         return;
     }
 
-    // SVG Icon for robust rendering (No font dependency)
-    const trashIconSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><path d="M135.2 17.7L128 32H32C14.3 32 0 46.3 0 64S14.3 96 32 96H416c17.7 0 32-14.3 32-32s-14.3-32-32-32H320l-7.2-14.3C307.4 6.8 296.3 0 284.2 0H163.8c-12.1 0-23.2 6.8-28.6 17.7zM416 128H32L53.2 467c1.6 25.3 22.6 45 47.9 45H346.9c25.3 0 46.3-19.7 47.9-45L416 128z"/></svg>`;
+    const trashIconSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512" style="width:14px;height:14px;"><path d="M135.2 17.7L128 32H32C14.3 32 0 46.3 0 64S14.3 96 32 96H416c17.7 0 32-14.3 32-32s-14.3-32-32-32H320l-7.2-14.3C307.4 6.8 296.3 0 284.2 0H163.8c-12.1 0-23.2 6.8-28.6 17.7zM416 128H32L53.2 467c1.6 25.3 22.6 45 47.9 45H346.9c25.3 0 46.3-19.7 47.9-45L416 128z"/></svg>`;
 
     projects.forEach((p, idx) => {
         const el = document.createElement('div');
@@ -234,7 +218,6 @@ async function openProject(path) {
         populateForm(config);
         log(`Loaded project: ${config.appName}`);
     } else {
-        // Defaults
         document.getElementById('productName').value = 'VisualNEO Desk Project';
         document.getElementById('appName').value = 'com.visualneodesk.' + Date.now();
         log('Initialized new project config');
@@ -270,20 +253,16 @@ tabs.forEach(tab => {
         const target = tab.dataset.tab;
         document.getElementById(`tab-${target}`).classList.add('active');
         
-        // Check Node when build tab opens
         if(target === 'build') checkNode();
-        // Check Extensions when PHP tab opens
         if(target === 'php' && document.getElementById('enablePhp').checked) loadExtensions(); 
     });
 });
 
-// PHP Logic
 phpToggle.addEventListener('change', () => {
     const isEnabled = phpToggle.checked;
     phpPanel.style.display = isEnabled ? 'block' : 'none';
     if(isEnabled) {
         if(!document.getElementById('phpPath').value) {
-            // Try auto-fill from cache
             const ver = document.getElementById('phpVersionSelect').value;
             if(phpCache[ver]) document.getElementById('phpPath').value = phpCache[ver];
         }
@@ -291,7 +270,6 @@ phpToggle.addEventListener('change', () => {
     }
 });
 
-// Data Mode Logic
 function updateDataModeUI() {
     cardStatic.classList.remove('selected');
     cardWritable.classList.remove('selected');
@@ -333,25 +311,17 @@ function renderExtensions() {
     
     availableExtensions.forEach(ext => {
         if(filter && !ext.name.toLowerCase().includes(filter)) return;
-
         const label = document.createElement('label');
         label.className = 'checkbox-card';
-        
         const chk = document.createElement('input');
         chk.type = 'checkbox';
         chk.checked = selectedExtensions.has(ext.file);
-        chk.onchange = () => { 
-            if(chk.checked) selectedExtensions.add(ext.file); 
-            else selectedExtensions.delete(ext.file); 
-        };
-        
+        chk.onchange = () => { if(chk.checked) selectedExtensions.add(ext.file); else selectedExtensions.delete(ext.file); };
         const customCheck = document.createElement('span');
         customCheck.className = 'custom-check';
-        
         const span = document.createElement('span');
-        span.innerText = ext.name; // Display friendly name
-        span.title = ext.file; // Tooltip full filename
-        
+        span.innerText = ext.name; 
+        span.title = ext.file; 
         label.appendChild(chk);
         label.appendChild(customCheck);
         label.appendChild(span);
@@ -359,26 +329,18 @@ function renderExtensions() {
     });
 }
 
-// Live Search
 extSearch.addEventListener('input', renderExtensions);
 
-// Install Extension
 document.getElementById('btnAddExt').onclick = async () => {
     const phpPath = document.getElementById('phpPath').value;
     if(!phpPath) { alert("Please select a PHP folder first."); return; }
-    
     const file = await window.api.selectFile(['dll']);
     if(file) {
         const res = await window.api.addPhpExtension(phpPath, file);
-        if(res.success) {
-            await loadExtensions();
-            alert("Extension installed successfully!");
-        } else {
-            alert("Failed to install extension: " + res.error);
-        }
+        if(res.success) { await loadExtensions(); alert("Extension installed successfully!"); } 
+        else { alert("Failed to install extension: " + res.error); }
     }
 };
-
 
 // --- FORM HANDLING ---
 
@@ -395,12 +357,9 @@ function resetForm() {
     document.getElementById('targetNsis').checked = true;
     document.getElementById('targetPortable').checked = true;
     document.getElementById('targetUnpacked').checked = false;
-    
-    // New Configs Defaults
     document.getElementById('phpTimezone').value = 'UTC';
     document.getElementById('phpOpcache').checked = true;
     document.getElementById('phpDisplayErrors').checked = false;
-    
     cardStatic.click();
     phpToggle.dispatchEvent(new Event('change'));
 }
@@ -415,44 +374,34 @@ function populateForm(c) {
     document.getElementById('winHeight').value = c.height || 800;
     document.getElementById('minWidth').value = c.minWidth || 0;
     document.getElementById('minHeight').value = c.minHeight || 0;
-    
     document.getElementById('resizable').checked = c.resizable;
     document.getElementById('fullscreenable').checked = c.fullscreenable;
     document.getElementById('center').checked = c.center;
     document.getElementById('saveState').checked = c.saveState;
     document.getElementById('kiosk').checked = c.kiosk;
-    
     document.getElementById('enablePhp').checked = c.enablePhp;
     document.getElementById('phpPath').value = c.phpPath || '';
     document.getElementById('phpMemory').value = c.phpMemory || '256M';
     document.getElementById('phpUpload').value = c.phpUpload || '64M';
     document.getElementById('phpTime').value = c.phpTime || '120';
-    
     document.getElementById('phpTimezone').value = c.phpTimezone || 'UTC';
-    document.getElementById('phpOpcache').checked = c.phpOpcache !== false; // Default true
+    document.getElementById('phpOpcache').checked = c.phpOpcache !== false; 
     document.getElementById('phpDisplayErrors').checked = c.phpDisplayErrors || false;
-    
     if(c.phpExtensions) selectedExtensions = new Set(c.phpExtensions);
-    
-    // Tray / System
     document.getElementById('trayIcon').checked = c.trayIcon;
     document.getElementById('minimizeToTray').checked = c.minimizeToTray;
     document.getElementById('closeToTray').checked = c.closeToTray || false;
     document.getElementById('showTaskbar').checked = c.showTaskbar !== false; 
-    
     document.getElementById('singleInstance').checked = c.singleInstance;
     document.getElementById('runBackground').checked = c.runBackground;
     document.getElementById('contextMenu').checked = c.contextMenu;
     document.getElementById('devTools').checked = c.devTools;
     document.getElementById('userAgent').value = c.userAgent || '';
     document.getElementById('iconPath').value = c.iconPath || '';
-    
     document.getElementById('targetNsis').checked = c.targetNsis;
     document.getElementById('targetPortable').checked = c.targetPortable;
     document.getElementById('targetUnpacked').checked = c.targetUnpacked;
-    
     if(c.dataMode === 'writable') cardWritable.click(); else cardStatic.click();
-    
     phpToggle.dispatchEvent(new Event('change'));
 }
 
@@ -460,7 +409,6 @@ function getAppConfig() {
     const phpPath = document.getElementById('phpPath').value;
     const usePhp = document.getElementById('enablePhp').checked;
     if(usePhp && !phpPath) { alert('PHP Path is required'); return null; }
-
     return {
         sourcePath: document.getElementById('sourcePath').value,
         productName: document.getElementById('productName').value,
@@ -477,8 +425,7 @@ function getAppConfig() {
         center: document.getElementById('center').checked,
         saveState: document.getElementById('saveState').checked,
         kiosk: document.getElementById('kiosk').checked,
-        enablePhp: usePhp,
-        phpPath: phpPath,
+        enablePhp: usePhp, phpPath: phpPath,
         phpMemory: document.getElementById('phpMemory').value,
         phpUpload: document.getElementById('phpUpload').value,
         phpTime: document.getElementById('phpTime').value,
@@ -486,12 +433,10 @@ function getAppConfig() {
         phpOpcache: document.getElementById('phpOpcache').checked,
         phpDisplayErrors: document.getElementById('phpDisplayErrors').checked,
         phpExtensions: [...selectedExtensions],
-        
         trayIcon: document.getElementById('trayIcon').checked,
         minimizeToTray: document.getElementById('minimizeToTray').checked,
         closeToTray: document.getElementById('closeToTray').checked,
         showTaskbar: document.getElementById('showTaskbar').checked,
-        
         singleInstance: document.getElementById('singleInstance').checked,
         runBackground: document.getElementById('runBackground').checked,
         contextMenu: document.getElementById('contextMenu').checked,
@@ -513,49 +458,30 @@ const btnBuild = document.getElementById('btnBuildFull');
 btnBuild.onclick = async () => {
     const config = getAppConfig();
     if(!config) return;
-    
     await saveCurrentConfig();
-    
-    // 1. ACTIVATE ANIMATION (INTERNAL)
     btnBuild.classList.add('loading');
-    
     try {
         log('Initializing Build Sequence...');
-        
         const genRes = await window.api.generateApp(config);
-        
         if(!genRes.success) {
             if (genRes.error === 'MISSING_ICON') {
-                alert("Icon Missing!\n\nA desktop application requires an icon. The default icon could not be found.\n\nPlease select an .ico or .png file in the 'App Branding' section.");
-                // Navigate to tab
+                alert("Icon Missing!\n\nPlease select an .ico or .png file.");
                 document.querySelector('[data-tab="build"]').click();
-                // Highlight button
                 const btn = document.getElementById('btnSelectIcon');
-                btn.style.borderColor = 'red';
-                btn.style.boxShadow = '0 0 10px red';
+                btn.style.borderColor = 'red'; btn.style.boxShadow = '0 0 10px red';
                 setTimeout(() => { btn.style.borderColor = ''; btn.style.boxShadow = ''; }, 2000);
-                
-                btnBuild.classList.remove('loading');
-                return;
+                btnBuild.classList.remove('loading'); return;
             }
             throw new Error(genRes.error);
         }
-        
         log('Configuration Generated.');
         log('Starting Electron Builder...');
-        
         const buildRes = await window.api.buildApp(config.sourcePath);
-        
-        // 2. DEACTIVATE ANIMATION
         btnBuild.classList.remove('loading');
-        
         if(buildRes.success) {
             successModal.classList.add('active');
-            // Set click handler for the success modal button
             btnOpenDist.onclick = () => window.api.openDistFolder(config.sourcePath);
-        } else {
-            alert('Build Failed. Check log below.');
-        }
+        } else { alert('Build Failed. Check log.'); }
     } catch (e) {
         btnBuild.classList.remove('loading');
         alert('Error: ' + e.message);
@@ -563,20 +489,16 @@ btnBuild.onclick = async () => {
     }
 };
 
-// Close Modal
-btnCloseSuccess.onclick = () => {
-    successModal.classList.remove('active');
-};
+btnCloseSuccess.onclick = () => { successModal.classList.remove('active'); };
 
 // --- AUXILIARY HANDLERS ---
 
-// Node Check
 async function checkNode() {
     const status = document.getElementById('nodeStatus');
     const res = await window.api.checkNode();
     if(!res.installed) status.style.display = 'block';
     else status.style.display = 'none';
-    return res; // Return for startup check
+    return res;
 }
 
 document.getElementById('btnInstallNode').onclick = async () => {
@@ -587,46 +509,28 @@ document.getElementById('btnInstallNode').onclick = async () => {
     checkNode();
 };
 
-// File Picking
 document.getElementById('btnSelectPhp').onclick = async () => {
     const p = await window.api.selectFolder();
-    if(p) {
-        document.getElementById('phpPath').value = p;
-        loadExtensions();
-    }
+    if(p) { document.getElementById('phpPath').value = p; loadExtensions(); }
 };
 document.getElementById('btnSelectIcon').onclick = async () => {
     const p = await window.api.selectFile(['ico','png','icns']);
     if(p) document.getElementById('iconPath').value = p;
 };
 
-// PHP Download
 document.getElementById('btnDownloadPhp').onclick = async () => {
     const ver = document.getElementById('phpVersionSelect').value;
     const btn = document.getElementById('btnDownloadPhp');
     const originalHtml = btn.innerHTML;
-    
     btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
-    
     const res = await window.api.downloadPhp(ver);
     btn.innerHTML = originalHtml;
-    
     if(res.success) {
         phpCache = await window.api.getPhpCache();
         document.getElementById('phpPath').value = res.path;
         loadExtensions();
-        alert(`PHP ${ver} downloaded and ready!`);
-    } else {
-        alert(res.error);
-    }
+        alert(`PHP ${ver} downloaded!`);
+    } else { alert(res.error); }
 };
 
-// Listen for build logs
-window.api.onDownloadProgress((data) => {
-    if(data.type === 'build-log') {
-        log(data.msg, data.error ? 'error' : 'info');
-    }
-});
-
-// Init
 initApp();
