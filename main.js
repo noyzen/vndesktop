@@ -480,13 +480,26 @@ function generatePackageJson(c) {
   if (c.targetPortable) targets.push("portable");
   if (c.targetUnpacked) targets.push("dir");
 
+  // Extra Resources Logic
+  // If PHP is enabled, we always treat bin/php as a resource that needs to be copied
+  // into the built app's resources folder (or alongside main.js for unpacked)
+  // electron-builder handles 'extraResources' by putting them in 'resources' folder in dist
+  const extraResources = [];
+  
+  if (c.enablePhp) {
+      extraResources.push({ "from": "bin/php", "to": "php", "filter": ["**/*"] });
+      // We also need the 'www' folder to be treated as a resource if we plan to extract it
+      // But standard 'files' array handles moving www to resources/app.
+      // For extraction logic in main.js, resources/app/www is accessible.
+  }
+
   const buildConfig = {
     appId: `com.visualneo.${c.appName.replace(/\s+/g, '').toLowerCase()}`,
     productName: c.productName,
     files: ["main.js", "www/**/*"],
-    extraResources: c.enablePhp ? [{ "from": "bin/php", "to": "php", "filter": ["**/*"] }] : [],
+    extraResources: extraResources,
     directories: { "output": "dist" },
-    asar: false,
+    asar: false, // Important for PHP speed and file access
     win: { target: targets, icon: c.iconPath ? path.basename(c.iconPath) : undefined },
     nsis: { oneClick: false, allowToChangeInstallationDirectory: true, createDesktopShortcut: true }
   };
@@ -525,13 +538,21 @@ const CONFIG = {
   singleInstance: ${c.singleInstance},
   kiosk: ${c.kiosk},
   contextMenu: ${c.contextMenu},
-  nativeFrame: ${c.nativeFrame}
+  nativeFrame: ${c.nativeFrame},
+  dataMode: "${c.dataMode || 'static'}" // 'static' or 'writable'
 };
 
 let mainWindow, tray = null, isQuitting = false, phpProcess = null, serverUrl = null;
 
-const webRoot = path.join(__dirname, 'www');
-const statePath = path.join(app.getPath('userData'), 'window-state.json');
+const webRootInternal = path.join(__dirname, 'www');
+// If writable mode, we use AppData/AppName/server_root
+const userDataDir = app.getPath('userData');
+const writableRoot = path.join(userDataDir, 'server_root');
+const versionFile = path.join(writableRoot, 'version.txt');
+const currentAppVersion = '${c.version}';
+
+// State Logic
+const statePath = path.join(userDataDir, 'window-state.json');
 
 function loadState() {
   try { return JSON.parse(fs.readFileSync(statePath, 'utf8')); } 
@@ -545,27 +566,104 @@ function saveState() {
   fs.writeFileSync(statePath, JSON.stringify({ ...bounds, isMaximized }));
 }
 
+// Recursive Copy Helper
+function copyRecursiveSync(src, dest) {
+  if (!fs.existsSync(src)) return;
+  if (!fs.existsSync(dest)) fs.mkdirSync(dest, { recursive: true });
+  
+  if (fs.lstatSync(src).isDirectory()) {
+      const entries = fs.readdirSync(src);
+      entries.forEach(entry => {
+          const srcPath = path.join(src, entry);
+          const destPath = path.join(dest, entry);
+          if (fs.lstatSync(srcPath).isDirectory()) {
+              copyRecursiveSync(srcPath, destPath);
+          } else {
+              fs.copyFileSync(srcPath, destPath);
+          }
+      });
+  }
+}
+
+// PHP Server Logic
+async function setupWritableEnvironment() {
+    // If not writable mode, return standard internal paths
+    if (CONFIG.dataMode !== 'writable') {
+        return {
+            webRoot: webRootInternal,
+            phpDir: getPhpBinaryDir()
+        };
+    }
+
+    // Check version to decide if we need to overwrite
+    let needsUpdate = true;
+    if (fs.existsSync(writableRoot) && fs.existsSync(versionFile)) {
+        const installedVer = fs.readFileSync(versionFile, 'utf8');
+        if (installedVer === currentAppVersion) needsUpdate = false;
+    }
+
+    // If needs update or first run, copy files
+    if (needsUpdate) {
+        // Copy WWW
+        copyRecursiveSync(webRootInternal, writableRoot);
+        
+        // Copy PHP (Logic depends on packing)
+        // In production, PHP is usually in resources/php.
+        // We might copy it to AppData to allow config changes (php.ini) if needed, 
+        // but usually PHP binary runs fine from resources. 
+        // However, to be fully self-contained writable as requested:
+        const internalPhp = getPhpBinaryDir();
+        const externalPhp = path.join(userDataDir, 'php_runtime');
+        
+        if (internalPhp && fs.existsSync(internalPhp)) {
+            copyRecursiveSync(internalPhp, externalPhp);
+        }
+        
+        fs.writeFileSync(versionFile, currentAppVersion);
+    }
+
+    return {
+        webRoot: writableRoot,
+        phpDir: path.join(userDataDir, 'php_runtime')
+    };
+}
+
+function getPhpBinaryDir() {
+    if (app.isPackaged) {
+       return path.join(process.resourcesPath, 'php');
+    } else {
+       return path.join(__dirname, 'bin', 'php');
+    }
+}
+
 async function startPhpServer() {
   return new Promise(async (resolve, reject) => {
     if (!CONFIG.usePhp) { serverUrl = null; return resolve(null); }
 
     try {
       const port = await portfinder.getPortPromise({ port: CONFIG.phpPort });
-      let phpBin;
-      if (app.isPackaged) {
-         phpBin = path.join(process.resourcesPath, 'php', 'php.exe');
-      } else {
-         phpBin = path.join(__dirname, 'bin', 'php', 'php.exe');
+      
+      // Determine paths
+      const env = await setupWritableEnvironment();
+      const docRoot = env.webRoot;
+      let phpPathObj = env.phpDir;
+      
+      // If writable mode copy failed or config says static, fallback to resources
+      if (CONFIG.dataMode !== 'writable' || !fs.existsSync(phpPathObj)) {
+          phpPathObj = getPhpBinaryDir();
+      }
+
+      const phpExe = path.join(phpPathObj, 'php.exe');
+      
+      if (!fs.existsSync(phpExe)) {
+         return reject(new Error("PHP binary not found at: " + phpExe));
       }
       
-      if (!fs.existsSync(phpBin)) {
-         return reject(new Error("PHP binary not found at: " + phpBin));
-      }
+      const iniPath = path.join(phpPathObj, 'php.ini');
       
-      const iniPath = path.join(path.dirname(phpBin), 'php.ini');
-      
-      phpProcess = spawn(phpBin, ['-S', '127.0.0.1:' + port, '-t', webRoot, '-c', iniPath], {
-        cwd: webRoot,
+      // Spawn PHP
+      phpProcess = spawn(phpExe, ['-S', '127.0.0.1:' + port, '-t', docRoot, '-c', iniPath], {
+        cwd: docRoot,
         stdio: 'ignore',
         windowsHide: true
       });
@@ -613,7 +711,7 @@ function createWindow() {
   } else if (CONFIG.entry.startsWith('http')) {
     mainWindow.loadURL(CONFIG.entry);
   } else {
-    mainWindow.loadFile(path.join(webRoot, CONFIG.entry));
+    mainWindow.loadFile(path.join(webRootInternal, CONFIG.entry));
   }
 
   ${c.userAgent ? `mainWindow.webContents.setUserAgent("${c.userAgent}");` : ''}

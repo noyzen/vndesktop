@@ -17,6 +17,11 @@ const chkNsis = document.getElementById('targetNsis');
 const chkPortable = document.getElementById('targetPortable');
 const chkUnpacked = document.getElementById('targetUnpacked');
 
+// Persistence Logic
+const radioStatic = document.querySelector('input[name="dataMode"][value="static"]');
+const radioWritable = document.querySelector('input[name="dataMode"][value="writable"]');
+const hintEl = document.getElementById('persistence-hint');
+
 // Modals
 const successModal = document.getElementById('successModal');
 
@@ -168,7 +173,7 @@ tabs.forEach(tab => {
   });
 });
 
-// PHP Toggle & Output Format Logic
+// PHP Toggle
 phpToggle.addEventListener('change', () => {
   if(phpToggle.checked) {
     // Show PHP Panel
@@ -182,27 +187,27 @@ phpToggle.addEventListener('change', () => {
         currentPathInput.value = phpCache[currentVer];
         updatePhpUiState();
     }
-
-    // Force Output to Portable Folder Only (to support dynamic PHP files)
-    chkUnpacked.checked = true;
-    chkUnpacked.disabled = true;
-    
-    chkNsis.checked = false;
-    chkNsis.disabled = true;
-    
-    chkPortable.checked = false;
-    chkPortable.disabled = true;
-
   } else {
     // Hide PHP Panel
     phpPanel.classList.add('hidden');
     phpDisabledMsg.classList.remove('hidden');
-
-    // Restore Output Options
-    chkUnpacked.disabled = false;
-    chkNsis.disabled = false;
-    chkPortable.disabled = false;
   }
+});
+
+// Persistence UI Logic
+function updatePersistenceUI() {
+    document.querySelectorAll('.radio-card').forEach(el => el.classList.remove('selected'));
+    if(radioStatic.checked) {
+        document.getElementById('card-mode-static').classList.add('selected');
+        hintEl.innerHTML = '<i class="fa-solid fa-info-circle"></i> <b>Static Mode:</b> Files are read from the installation folder. Writing files inside the app folder will usually fail (Read-Only).';
+    } else {
+        document.getElementById('card-mode-writable').classList.add('selected');
+        hintEl.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> <b>Writable Mode:</b> On first run, "www" folder will be copied to <code>%AppData%/YourAppID</code>. Uninstalling the EXE will <b>NOT</b> remove these data files automatically.';
+    }
+}
+
+document.querySelectorAll('input[name="dataMode"]').forEach(el => {
+    el.addEventListener('change', updatePersistenceUI);
 });
 
 // Logger
@@ -382,6 +387,10 @@ function resetForm() {
     chkNsis.checked = true;
     chkPortable.checked = true;
     chkUnpacked.checked = false;
+    
+    // Reset Persistence
+    radioStatic.checked = true;
+    updatePersistenceUI();
 
     phpToggle.dispatchEvent(new Event('change'));
 }
@@ -425,6 +434,10 @@ function populateForm(c) {
     chkNsis.checked = c.targetNsis;
     chkPortable.checked = c.targetPortable;
     chkUnpacked.checked = c.targetUnpacked;
+    
+    if(c.dataMode === 'writable') radioWritable.checked = true;
+    else radioStatic.checked = true;
+    updatePersistenceUI();
     
     phpToggle.dispatchEvent(new Event('change'));
 }
@@ -476,6 +489,7 @@ function getAppConfig() {
     targetNsis: chkNsis.checked,
     targetPortable: chkPortable.checked,
     targetUnpacked: chkUnpacked.checked,
+    dataMode: document.querySelector('input[name="dataMode"]:checked').value
   };
 }
 
