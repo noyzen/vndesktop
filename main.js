@@ -586,22 +586,38 @@ ipcMain.handle('download-php', async (event, version) => {
 // --- NODE.JS HANDLERS ---
 
 ipcMain.handle('check-node-install', async () => {
-    const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
     const env = getBuildEnv();
-    
+    const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+    const nodeCmd = 'node';
+
     return new Promise((resolve) => {
-        exec(`${npmCmd} -v`, { env }, (err, stdout) => {
+        // 1. Check Node.js
+        exec(`${nodeCmd} -v`, { env }, (err, nodeOut) => {
             if (err) {
-                resolve({ installed: false, local: false });
-            } else {
+                // Node not found at all
+                return resolve({ 
+                    installed: false, 
+                    nodeVersion: null, 
+                    npmVersion: null,
+                    local: false 
+                });
+            }
+
+            const nodeVer = nodeOut.trim();
+
+            // 2. Check NPM
+            exec(`${npmCmd} -v`, { env }, (err2, npmOut) => {
                 const localPath = getLocalNodePath();
+                const npmVer = err2 ? null : npmOut.trim();
+
                 resolve({ 
                     installed: true, 
-                    version: stdout.trim(), 
+                    nodeVersion: nodeVer, 
+                    npmVersion: npmVer,
                     local: !!localPath,
                     path: localPath || 'Global'
                 });
-            }
+            });
         });
     });
 });
@@ -610,7 +626,8 @@ ipcMain.handle('install-node', async () => {
     const nodeDir = path.join(app.getPath('userData'), 'node-env');
     if (!fs.existsSync(nodeDir)) fs.mkdirSync(nodeDir, { recursive: true });
     
-    const version = 'v20.18.0';
+    // LATEST LTS VERSION (Hydrogen/Iron/Jod)
+    const version = 'v22.11.0'; 
     const filename = `node-${version}-win-x64.zip`;
     const url = `https://nodejs.org/dist/${version}/${filename}`;
     const zipPath = path.join(nodeDir, filename);
@@ -619,7 +636,7 @@ ipcMain.handle('install-node', async () => {
         mainWindow.webContents.send('download-progress', { percent: 0, status: 'Connecting to nodejs.org...' });
         
         await downloadFile(url, zipPath, (percent, current, total) => {
-            mainWindow.webContents.send('download-progress', { percent, current, total, status: 'Downloading Node.js (Portable)...' });
+            mainWindow.webContents.send('download-progress', { percent, current, total, status: `Downloading Node.js ${version}...` });
         });
         
         mainWindow.webContents.send('download-progress', { percent: 100, status: 'Extracting Engine...' });
@@ -1238,5 +1255,3 @@ else {
 
 // Ensure PHP is killed if the process crashes or exits unexpectedly
 process.on('exit', () => killPhp());
-`;
-}

@@ -174,6 +174,97 @@
           font-weight: 500;
       }
       
+      /* --- STARTUP VIEW --- */
+      #view-boot {
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          background: #0f0f13;
+          z-index: 9999;
+      }
+
+      .boot-card {
+          background: rgba(30, 30, 35, 0.6);
+          backdrop-filter: blur(20px);
+          border: 1px solid var(--border);
+          padding: 50px;
+          border-radius: 24px;
+          width: 450px;
+          text-align: center;
+          box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+          animation: fadeIn 0.5s ease-out;
+      }
+
+      .boot-logo {
+        font-size: 3rem;
+        font-weight: 900;
+        background: var(--gradient);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        margin-bottom: 10px;
+        letter-spacing: -2px;
+      }
+
+      .boot-status-container {
+          margin: 30px 0;
+          display: flex;
+          flex-direction: column;
+          gap: 15px;
+          background: rgba(0,0,0,0.2);
+          padding: 20px;
+          border-radius: 12px;
+          border: 1px solid rgba(255,255,255,0.05);
+      }
+
+      .boot-item {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          color: var(--text-muted);
+          font-size: 0.9rem;
+      }
+      
+      .boot-item-icon { width: 24px; display: flex; justify-content: center; font-size: 1.2rem; }
+      .boot-item-label { flex: 1; text-align: left; padding-left: 15px; font-weight: 500; }
+      .boot-item-status { font-family: 'Consolas', monospace; font-size: 0.8rem; }
+      
+      .status-loading { color: #60a5fa; animation: pulse 1.5s infinite; }
+      .status-ok { color: #4ade80; }
+      .status-err { color: #f87171; }
+
+      @keyframes pulse { 50% { opacity: 0.5; } }
+
+      .boot-action-area {
+          min-height: 50px;
+          display: flex;
+          justify-content: center;
+          align-items: center;
+      }
+      
+      .progress-bar-container {
+          width: 100%;
+          height: 6px;
+          background: rgba(255,255,255,0.1);
+          border-radius: 3px;
+          overflow: hidden;
+          display: none;
+          position: relative;
+      }
+      
+      .progress-bar-fill {
+          height: 100%;
+          background: var(--primary);
+          width: 0%;
+          transition: width 0.1s linear;
+      }
+      
+      .progress-text {
+          position: absolute;
+          top: -25px; left: 0; width: 100%;
+          text-align: center; font-size: 0.75rem; color: #aaa;
+      }
+
+
       /* --- PROJECT MANAGER VIEW --- */
       #view-manager {
         flex-direction: column;
@@ -539,6 +630,38 @@
 </head>
 <body>
 
+    <!-- BOOT SCREEN (STARTUP CHECK) -->
+    <div id="view-boot" class="view-section">
+        <div class="boot-card">
+            <div class="boot-logo">VisualNEO</div>
+            <div style="color:#aaa; margin-bottom:10px;">System Environment Check</div>
+            
+            <div class="boot-status-container">
+                <div class="boot-item">
+                    <div class="boot-item-icon"><i class="fa-brands fa-node-js" style="color:#6cc24a;"></i></div>
+                    <div class="boot-item-label">Node.js Runtime</div>
+                    <div class="boot-item-status status-loading" id="bootStatusNode">Checking...</div>
+                </div>
+                <div class="boot-item">
+                    <div class="boot-item-icon"><i class="fa-brands fa-npm" style="color:#cb3837;"></i></div>
+                    <div class="boot-item-label">NPM Manager</div>
+                    <div class="boot-item-status status-loading" id="bootStatusNpm">Checking...</div>
+                </div>
+            </div>
+
+            <div class="boot-action-area" id="bootActionArea">
+                <!-- Dynamic Content (Buttons/Progress) -->
+                <div style="color:#666; font-size:0.9rem;">Verifying dependencies...</div>
+            </div>
+            
+            <!-- Progress Bar -->
+            <div class="progress-bar-container" id="bootProgress" style="margin-top:25px;">
+                <div class="progress-text" id="bootProgressText">Downloading...</div>
+                <div class="progress-bar-fill" id="bootProgressFill"></div>
+            </div>
+        </div>
+    </div>
+
     <!-- SUCCESS MODAL -->
     <div id="successModal" class="modal-glass">
         <div class="modal-box">
@@ -553,7 +676,7 @@
     </div>
 
     <!-- PROJECT MANAGER -->
-    <div id="view-manager" class="view-section">
+    <div id="view-manager" class="view-section hidden">
         <div class="pm-container">
             <div class="pm-hero">
                 <div class="pm-logo">VisualNEO Desk</div>

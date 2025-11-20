@@ -1,8 +1,17 @@
 
 // View Elements
+const viewBoot = document.getElementById('view-boot');
 const viewManager = document.getElementById('view-manager');
 const viewEditor = document.getElementById('view-editor');
 const projectListEl = document.getElementById('projectList');
+
+// Boot UI
+const bootStatusNode = document.getElementById('bootStatusNode');
+const bootStatusNpm = document.getElementById('bootStatusNpm');
+const bootActionArea = document.getElementById('bootActionArea');
+const bootProgress = document.getElementById('bootProgress');
+const bootProgressFill = document.getElementById('bootProgressFill');
+const bootProgressText = document.getElementById('bootProgressText');
 
 // Modals & Overlays
 const successModal = document.getElementById('successModal');
@@ -33,6 +42,7 @@ let phpCache = {};
 // --- UI HELPERS ---
 
 function showManager() {
+    viewBoot.classList.add('hidden');
     viewEditor.classList.add('hidden');
     viewManager.classList.remove('hidden');
     currentProjectPath = null;
@@ -40,6 +50,7 @@ function showManager() {
 }
 
 function showEditor() {
+    viewBoot.classList.add('hidden');
     viewManager.classList.add('hidden');
     viewEditor.classList.remove('hidden');
 }
@@ -65,6 +76,96 @@ document.getElementById('btnCopyLog').onclick = async () => {
     btn.innerHTML = '<i class="fa-solid fa-check"></i> Copied!';
     setTimeout(() => { btn.innerHTML = original; }, 1500);
 };
+
+// --- STARTUP & DEPENDENCY CHECK ---
+
+async function initApp() {
+    // Reset Boot UI
+    bootActionArea.innerHTML = '';
+    bootProgress.style.display = 'none';
+    bootStatusNode.className = 'boot-item-status status-loading';
+    bootStatusNode.innerText = 'Checking...';
+    bootStatusNpm.className = 'boot-item-status status-loading';
+    bootStatusNpm.innerText = 'Checking...';
+
+    // 1. Check PHP Cache (Background)
+    window.api.getPhpCache().then(c => phpCache = c);
+
+    // 2. Check Node
+    // Small delay to allow UI to render (animation)
+    await new Promise(r => setTimeout(r, 600));
+    
+    const nodeCheck = await window.api.checkNode();
+    
+    if(nodeCheck.installed) {
+        bootStatusNode.className = 'boot-item-status status-ok';
+        bootStatusNode.innerText = nodeCheck.nodeVersion + (nodeCheck.local ? ' (Portable)' : ' (Global)');
+        
+        if(nodeCheck.npmVersion) {
+            bootStatusNpm.className = 'boot-item-status status-ok';
+            bootStatusNpm.innerText = nodeCheck.npmVersion;
+        } else {
+             bootStatusNpm.className = 'boot-item-status status-err';
+             bootStatusNpm.innerText = 'Not Found';
+        }
+
+        // Success - Proceed
+        bootActionArea.innerHTML = '<div style="color:#4ade80; font-weight:600;">System Ready</div>';
+        setTimeout(() => {
+            showManager();
+        }, 1200);
+    } else {
+        // Missing
+        bootStatusNode.className = 'boot-item-status status-err';
+        bootStatusNode.innerText = 'Not Installed';
+        bootStatusNpm.className = 'boot-item-status status-err';
+        bootStatusNpm.innerText = 'Not Installed';
+
+        // Show Install Button
+        const btn = document.createElement('button');
+        btn.innerHTML = '<i class="fa-brands fa-node-js"></i> Auto-Install Node.js LTS';
+        btn.onclick = performAutoInstall;
+        bootActionArea.innerHTML = '';
+        bootActionArea.appendChild(btn);
+    }
+}
+
+async function performAutoInstall() {
+    bootActionArea.innerHTML = '<div style="color:#aaa;">Initializing installation...</div>';
+    bootProgress.style.display = 'block';
+    
+    const result = await window.api.installNode();
+    
+    if(result.success) {
+        bootActionArea.innerHTML = '<div style="color:#4ade80; font-weight:600;">Installation Complete!</div>';
+        setTimeout(initApp, 1000); // Re-run check to verify and proceed
+    } else {
+        bootActionArea.innerHTML = `<div style="color:#f87171;">Error: ${result.error}</div>`;
+        // Allow retry
+        const btn = document.createElement('button');
+        btn.innerText = "Retry";
+        btn.style.marginTop = "10px";
+        btn.onclick = performAutoInstall;
+        bootActionArea.appendChild(btn);
+    }
+}
+
+// Listen for install progress
+window.api.onDownloadProgress((data) => {
+    // Handle Build Logs separately
+    if(data.type === 'build-log') {
+        log(data.msg, data.error ? 'error' : 'info');
+        return;
+    }
+    
+    // Handle Boot Install Progress
+    if(viewBoot.classList.contains('hidden') === false) {
+        const p = Math.round(data.percent);
+        bootProgressFill.style.width = `${p}%`;
+        bootProgressText.innerText = data.status || `${p}%`;
+    }
+});
+
 
 // --- PROJECT MANAGER ---
 
@@ -475,6 +576,7 @@ async function checkNode() {
     const res = await window.api.checkNode();
     if(!res.installed) status.style.display = 'block';
     else status.style.display = 'none';
+    return res; // Return for startup check
 }
 
 document.getElementById('btnInstallNode').onclick = async () => {
@@ -527,5 +629,4 @@ window.api.onDownloadProgress((data) => {
 });
 
 // Init
-renderProjectList();
-window.api.getPhpCache().then(c => phpCache = c);
+initApp();
