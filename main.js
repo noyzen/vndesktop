@@ -593,7 +593,7 @@ ipcMain.handle('build-app', async (event, sourceRoot) => {
                     return resolve({ success: false, error: 'Install failed' });
                 }
                 
-                sendLog('Building application...');
+                sendLog('Building application artifacts...');
                 const build = spawn(npmCmd, ['run', 'build'], { cwd: buildDir, shell: true, env: buildEnv });
                 
                 build.stdout.on('data', (d) => sendLog(d.toString()));
@@ -663,17 +663,13 @@ function generatePackageJson(c) {
       extraResources.push({ "from": "bin/php", "to": "php", "filter": ["**/*"] });
   }
 
-  // To allow self-contained extraction for standard files, we can also treat www as a resource
-  // However, usually www is inside app.asar. For 'Writable' mode, we rely on copying from app path.
-  // But ensuring 'bin' or similar structure works helps.
-
   const buildConfig = {
     appId: `com.visualneo.${c.appName.replace(/\s+/g, '').toLowerCase()}`,
     productName: c.productName,
     files: ["main.js", "www/**/*"], // 'www' inside app.asar (or app folder if asar:false)
     extraResources: extraResources,
     directories: { "output": "dist" },
-    asar: false, // Keep false to make file copying easier and faster for PHP
+    asar: true, // Use ASAR for better performance, we will extract resources manually
     win: { target: targets, icon: c.iconPath ? path.basename(c.iconPath) : undefined },
     nsis: { oneClick: false, allowToChangeInstallationDirectory: true, createDesktopShortcut: true }
   };
@@ -685,7 +681,7 @@ function generatePackageJson(c) {
     main: "main.js",
     author: c.author,
     scripts: { "start": "electron .", "build": "electron-builder" },
-    dependencies: { "portfinder": "^1.0.32" },
+    dependencies: { },
     devDependencies: { "electron": "^29.1.5", "electron-builder": "^24.13.3" },
     build: buildConfig
   };
@@ -694,17 +690,17 @@ function generatePackageJson(c) {
 }
 
 function generateMainJs(c) {
+  // Robust Template with Dynamic Ports and Isolation
   return `const { app, BrowserWindow, Tray, Menu, ipcMain, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
-const portfinder = require('portfinder');
 
+// --- CONFIGURATION ---
 const CONFIG = {
   title: "${c.productName}",
   entry: "${c.entryPoint}",
   usePhp: ${c.enablePhp},
-  phpPort: ${c.phpPort},
   saveState: ${c.saveState},
   tray: ${c.trayIcon},
   minToTray: ${c.minimizeToTray},
@@ -713,21 +709,24 @@ const CONFIG = {
   kiosk: ${c.kiosk},
   contextMenu: ${c.contextMenu},
   nativeFrame: ${c.nativeFrame},
-  dataMode: "${c.dataMode || 'static'}" // 'static' or 'writable'
+  dataMode: "${c.dataMode || 'static'}" // 'static' (temp) or 'writable' (appdata)
 };
 
 let mainWindow, tray = null, isQuitting = false, phpProcess = null, serverUrl = null;
 
-// Path Management
-// In production (ASAR=false or true), __dirname usually points to resources/app
-const webRootInternal = path.join(__dirname, 'www'); 
-const userDataDir = app.getPath('userData');
-const writableRoot = path.join(userDataDir, 'server_root');
-const versionFile = path.join(writableRoot, 'version.txt');
-const currentAppVersion = '${c.version}';
+// --- PATH RESOLUTION ---
 
-// State Logic
-const statePath = path.join(userDataDir, 'window-state.json');
+// In production, resources are in process.resourcesPath. In Dev, they are relative to main.js
+const isDev = !app.isPackaged;
+const resourcesPath = isDev ? path.join(__dirname, 'bin') : process.resourcesPath;
+const appDataDir = app.getPath('userData');
+const tempDir = app.getPath('temp');
+
+// Unique ID for this instance (used for temp isolation)
+const instanceId = 'vneo-' + Date.now() + '-' + Math.floor(Math.random() * 1000);
+
+// --- STATE MANAGEMENT ---
+const statePath = path.join(appDataDir, 'window-state.json');
 
 function loadState() {
   try { return JSON.parse(fs.readFileSync(statePath, 'utf8')); } 
@@ -741,7 +740,8 @@ function saveState() {
   fs.writeFileSync(statePath, JSON.stringify({ ...bounds, isMaximized }));
 }
 
-// Robust Recursive Copy Sync
+// --- FILE SYSTEM HELPERS ---
+
 function syncDir(src, dest) {
   if (!fs.existsSync(src)) return;
   if (!fs.existsSync(dest)) fs.mkdirSync(dest, { recursive: true });
@@ -755,105 +755,118 @@ function syncDir(src, dest) {
       if (stat.isDirectory()) {
           syncDir(srcPath, destPath);
       } else {
-          // Copy if dest doesn't exist or if we want to force update (usually good for code files)
-          // specific logic: for user data files we might want to preserve, but this is the APP code
-          // so we generally overwrite to update the app logic.
-          fs.copyFileSync(srcPath, destPath);
+          // In Writable mode, we only overwrite if version changed or file missing
+          // But for simplicity and updates, we usually overwrite core files.
+          // For database/config files that user modifies, they should be in specific ignored paths 
+          // or handled by app logic. Here we overwrite to ensure app update works.
+          try {
+             fs.copyFileSync(srcPath, destPath);
+          } catch(e) {
+             // Ignore busy file errors
+          }
       }
   });
 }
 
-// Initialize Writable Environment (Self-Contained Mode)
-async function setupWritableEnvironment() {
-    if (CONFIG.dataMode !== 'writable') {
-        return {
-            webRoot: webRootInternal,
-            phpDir: getInternalPhpDir()
-        };
+// --- RUNTIME ENVIRONMENT SETUP ---
+
+async function setupEnvironment() {
+    const internalPhp = isDev ? path.join(__dirname, 'bin', 'php') : path.join(process.resourcesPath, 'php');
+    // In standard Electron (ASAR=true), www is inside app.asar. 
+    // To serve via PHP, we MUST extract it to the file system.
+    const internalWww = path.join(__dirname, 'www'); 
+
+    let runtimeRoot;
+
+    if (CONFIG.dataMode === 'writable') {
+        // Writable: Use AppData/Roaming. Shared between runs. Persistent.
+        runtimeRoot = path.join(appDataDir, 'server_root');
+    } else {
+        // Static: Use Temp Folder. Unique per session? 
+        // To support multiple instances perfectly without locking, we use a unique temp folder.
+        runtimeRoot = path.join(tempDir, CONFIG.title.replace(/\\W/g,''), instanceId);
     }
 
+    // Version Check (Only for Writable mode optimization)
+    const versionFile = path.join(runtimeRoot, 'version.txt');
+    const currentAppVersion = '${c.version}';
     let needsUpdate = true;
-    if (fs.existsSync(writableRoot) && fs.existsSync(versionFile)) {
-        const installedVer = fs.readFileSync(versionFile, 'utf8');
-        if (installedVer === currentAppVersion) needsUpdate = false;
+
+    if (CONFIG.dataMode === 'writable' && fs.existsSync(versionFile)) {
+       const installedVer = fs.readFileSync(versionFile, 'utf8');
+       if (installedVer === currentAppVersion) needsUpdate = false;
     }
 
-    if (needsUpdate) {
+    if (needsUpdate || CONFIG.dataMode !== 'writable') {
+        // Determine extraction source for WWW
+        // If ASAR is used, fs.copyFileSync works transparently for reading from ASAR.
         try {
-            console.log("Updating/Installing Writable Environment to: " + writableRoot);
-            // 1. Copy WWW content
-            syncDir(webRootInternal, writableRoot);
-
-            // 2. Copy PHP Runtime
-            const internalPhp = getInternalPhpDir();
-            const externalPhp = path.join(writableRoot, 'php'); // Keep php inside server_root for tidiness? Or parallel.
-            // Let's put it parallel in userData so it doesn't get exposed to web if root is wrong
-            const securePhpDest = path.join(userDataDir, 'php_runtime');
+            syncDir(internalWww, runtimeRoot);
             
-            if (internalPhp && fs.existsSync(internalPhp)) {
-                syncDir(internalPhp, securePhpDest);
+            // Extract PHP if needed
+            if (CONFIG.usePhp) {
+                const phpDest = path.join(runtimeRoot, 'php');
+                syncDir(internalPhp, phpDest);
             }
             
-            fs.writeFileSync(versionFile, currentAppVersion);
-            
-            return {
-                webRoot: writableRoot,
-                phpDir: securePhpDest
-            };
+            if (CONFIG.dataMode === 'writable') fs.writeFileSync(versionFile, currentAppVersion);
         } catch (e) {
-            console.error("Extraction failed", e);
-            // Fallback to internal
-            return { webRoot: webRootInternal, phpDir: getInternalPhpDir() };
+            console.error("Environment Setup Error:", e);
         }
     }
 
     return {
-        webRoot: writableRoot,
-        phpDir: path.join(userDataDir, 'php_runtime')
+        docRoot: runtimeRoot,
+        phpDir: path.join(runtimeRoot, 'php')
     };
 }
 
-function getInternalPhpDir() {
-    if (app.isPackaged) {
-       return path.join(process.resourcesPath, 'php');
-    } else {
-       // Dev mode
-       return path.join(__dirname, 'bin', 'php');
-    }
-}
+// --- PHP SERVER MANAGER ---
 
 async function startPhpServer() {
   return new Promise(async (resolve, reject) => {
     if (!CONFIG.usePhp) { serverUrl = null; return resolve(null); }
 
     try {
-      const port = await portfinder.getPortPromise({ port: CONFIG.phpPort });
-      
-      // Setup Environment (Static vs Writable)
-      const env = await setupWritableEnvironment();
-      const docRoot = env.webRoot;
-      let phpPathObj = env.phpDir;
-      
-      // Verification
-      if (!fs.existsSync(phpPathObj)) phpPathObj = getInternalPhpDir();
-      
-      const phpExe = path.join(phpPathObj, 'php.exe');
-      if (!fs.existsSync(phpExe)) {
-         console.error("PHP Binary missing at " + phpExe);
-         return reject(new Error("PHP binary not found."));
-      }
-      
-      const iniPath = path.join(phpPathObj, 'php.ini');
-      
-      // Spawn PHP
-      phpProcess = spawn(phpExe, ['-S', '127.0.0.1:' + port, '-t', docRoot, '-c', iniPath], {
-        cwd: docRoot, // Important: PHP CWD is the document root
-        stdio: 'ignore',
+      const env = await setupEnvironment();
+      const phpExe = path.join(env.phpDir, 'php.exe');
+      const phpIni = path.join(env.phpDir, 'php.ini');
+
+      if (!fs.existsSync(phpExe)) return reject(new Error("PHP Binary not found"));
+
+      // ROBUSTNESS: Use Port 0 to let OS assign a free random port.
+      // This prevents conflicts with existing web servers or other instances.
+      phpProcess = spawn(phpExe, ['-S', '127.0.0.1:0', '-t', env.docRoot, '-c', phpIni], {
+        cwd: env.docRoot,
         windowsHide: true
       });
 
-      serverUrl = \`http://127.0.0.1:\${port}/\`;
-      setTimeout(resolve, 500, serverUrl); 
+      // Capture Port from stderr/stdout
+      let portFound = false;
+      
+      const checkOutput = (data) => {
+          const str = data.toString();
+          // Regex to find "Listening on http://127.0.0.1:XXXX"
+          const match = str.match(/Listening on http:\\/\\/127\\.0\\.0\\.1:(\\d+)/);
+          if (match && !portFound) {
+              portFound = true;
+              const port = match[1];
+              serverUrl = \`http://127.0.0.1:\${port}/\`;
+              resolve(serverUrl);
+          }
+      };
+
+      phpProcess.stdout.on('data', checkOutput);
+      phpProcess.stderr.on('data', checkOutput);
+
+      phpProcess.on('error', (err) => {
+          reject(err);
+      });
+      
+      phpProcess.on('close', () => {
+          // If closed unexpectedly before port found
+          if (!portFound) reject(new Error("PHP exited immediately"));
+      });
 
     } catch (e) {
       reject(e);
@@ -863,10 +876,23 @@ async function startPhpServer() {
 
 function killPhp() {
   if (phpProcess) {
-    phpProcess.kill();
+    // Windows robust kill
+    spawn("taskkill", ["/pid", phpProcess.pid, '/f', '/t']);
     phpProcess = null;
   }
+  
+  // Cleanup Temp files if Static Mode
+  if (CONFIG.dataMode !== 'writable') {
+     try {
+        const envPath = path.join(tempDir, CONFIG.title.replace(/\\W/g,''), instanceId);
+        // We can't delete immediately if file locked, but we try.
+        // fs.rmSync(envPath, { recursive: true, force: true }); 
+        // Doing this on exit is risky in Electron. OS cleans temp eventually.
+     } catch(e) {}
+  }
 }
+
+// --- UI & APP LIFECYCLE ---
 
 function createWindow() {
   const state = CONFIG.saveState ? loadState() : { width: ${c.width}, height: ${c.height} };
@@ -876,6 +902,7 @@ function createWindow() {
     resizable: ${c.resizable}, fullscreenable: ${c.fullscreenable},
     kiosk: CONFIG.kiosk, frame: CONFIG.nativeFrame, center: ${c.center},
     autoHideMenuBar: true, show: false,
+    backgroundColor: '#121212',
     webPreferences: { nodeIntegration: false, contextIsolation: true, devTools: ${c.devTools} }
   };
   
@@ -891,8 +918,21 @@ function createWindow() {
   } else if (CONFIG.entry.startsWith('http')) {
     mainWindow.loadURL(CONFIG.entry);
   } else {
-    // Static file loading
-    mainWindow.loadFile(path.join(webRootInternal, CONFIG.entry));
+    // Fallback for static mode without PHP, load from temp/generated folder
+    // or if Writable, from AppData
+    if (CONFIG.usePhp === false) {
+         // If no PHP, we still need to serve files.
+         // Simple Electron File Protocol
+         // For generated static apps, files are in resources/app/www
+         // But if we use 'writable', they are in AppData.
+         
+         let finalPath = path.join(__dirname, 'www', CONFIG.entry);
+         // Check if we extracted?
+         if (CONFIG.dataMode === 'writable') {
+            finalPath = path.join(appDataDir, 'server_root', CONFIG.entry);
+         }
+         mainWindow.loadFile(finalPath);
+    }
   }
 
   ${c.userAgent ? `mainWindow.webContents.setUserAgent("${c.userAgent}");` : ''}
@@ -922,8 +962,11 @@ function createWindow() {
 function createTray() {
   if (!CONFIG.tray) return;
   let iconPath = path.join(__dirname, ${c.iconPath ? `'${path.basename(c.iconPath)}'` : `'appicon.png'`});
-  if (!fs.existsSync(iconPath) && app.isPackaged) iconPath = path.join(process.resourcesPath, ${c.iconPath ? `'${path.basename(c.iconPath)}'` : `'appicon.png'`});
-  
+  // Handle packed path
+  if (process.resourcesPath && !fs.existsSync(iconPath)) {
+     iconPath = path.join(process.resourcesPath, ${c.iconPath ? `'${path.basename(c.iconPath)}'` : `'appicon.png'`});
+  }
+
   try {
      tray = new Tray(iconPath);
      tray.setToolTip(CONFIG.title);
@@ -935,6 +978,7 @@ function createTray() {
   } catch (e) {}
 }
 
+// Single Instance Lock
 const gotLock = CONFIG.singleInstance ? app.requestSingleInstanceLock() : true;
 if (!gotLock) {
   app.quit();
