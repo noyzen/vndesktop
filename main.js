@@ -15,63 +15,58 @@ async function deleteFolderRobust(targetPath, isBackground = false) {
     if (!fs.existsSync(targetPath)) return;
     
     const exists = () => fs.existsSync(targetPath);
-    const maxRetries = 15; 
+    const maxRetries = 10; 
+    
     for (let i = 0; i < maxRetries; i++) {
         try {
             if (process.platform === 'win32') {
+                // Try simple node deletion first
                 try {
-                    execSync(`rmdir /s /q "${targetPath}"`, { stdio: 'ignore' });
-                } catch(e) {
                     fs.rmSync(targetPath, { recursive: true, force: true });
+                } catch (err) {
+                    // Fallback to system command
+                    execSync(`rmdir /s /q "${targetPath}"`, { stdio: 'ignore' });
                 }
             } else {
                 fs.rmSync(targetPath, { recursive: true, force: true });
             }
             
             if (!exists()) return;
-            if (i === maxRetries - 1) throw new Error("Resource locked or permission denied.");
             
-            const delay = 200 * Math.pow(1.4, i);
+            // If still exists, wait with exponential backoff
+            const delay = 200 * Math.pow(1.5, i);
             await new Promise(resolve => setTimeout(resolve, delay));
 
         } catch (e) {
             if (i === maxRetries - 1) {
                 if (!isBackground) console.error(`Failed to delete ${targetPath}: ${e.message}`);
-                if (!isBackground) throw e;
+                // Last ditch: Rename it so it doesn't block new writes
+                forceMoveToTrash(targetPath);
             }
         }
     }
 }
 
-// Move to Trash strategy
+// Move to Trash strategy (Rename to temp)
 function forceMoveToTrash(targetPath) {
+    if (!fs.existsSync(targetPath)) return null;
     const name = `trash_${path.basename(targetPath)}_${Date.now()}`;
     try {
         const tempDest = path.join(app.getPath('temp'), name);
-        if (process.platform === 'win32') {
-            execSync(`move "${targetPath}" "${tempDest}"`, { stdio: 'ignore' });
-        } else {
-            fs.renameSync(targetPath, tempDest);
-        }
+        // Try moving to system temp first (cross-drive might fail)
+        fs.renameSync(targetPath, tempDest);
         return tempDest; 
-    } catch (e) { /* EXDEV */ }
-
-    try {
-        const parentDir = path.dirname(targetPath); 
-        const buildDir = path.dirname(parentDir);
-        if (path.basename(parentDir) === 'dist') {
-            const trashDir = path.join(buildDir, '.trash');
+    } catch (e) { 
+        // If cross-drive or perm issue, try moving to a .trash folder in the parent
+        try {
+            const parentDir = path.dirname(targetPath); 
+            const trashDir = path.join(parentDir, '.trash');
             if (!fs.existsSync(trashDir)) fs.mkdirSync(trashDir, { recursive: true });
             const localDest = path.join(trashDir, name);
-            if (process.platform === 'win32') {
-                execSync(`move "${targetPath}" "${localDest}"`, { stdio: 'ignore' });
-            } else {
-                fs.renameSync(targetPath, localDest);
-            }
+            fs.renameSync(targetPath, localDest);
             return localDest;
-        }
-    } catch (e) { return null; }
-    return null;
+        } catch (e2) { return null; }
+    }
 }
 
 async function prepareDistFolder(buildDir, sendLog) {
@@ -81,18 +76,15 @@ async function prepareDistFolder(buildDir, sendLog) {
     sendLog("Cleaning output directory...");
     try {
         await deleteFolderRobust(distPath);
+        if (fs.existsSync(distPath)) {
+             // If it still exists after robust delete, force rename it
+             forceMoveToTrash(distPath);
+             sendLog("Output directory was locked. Renamed to temporary trash to proceed.");
+        }
         return true;
     } catch (e) {
-        sendLog("Standard clean failed (Locked). Attempting displacement strategy...");
-        const trashPath = forceMoveToTrash(distPath);
-        if (trashPath) {
-            sendLog(`Moved locked folder to trash area.`);
-            deleteFolderRobust(trashPath, true).catch(() => {});
-            return true;
-        } else {
-            sendLog(`Critical: Could not move locked folder.`, true);
-            return false;
-        }
+        sendLog(`Critical: Could not clean output directory: ${e.message}`, true);
+        return false;
     }
 }
 
@@ -105,10 +97,14 @@ function copyFolderRecursiveSync(source, target, exclusions = []) {
       if (exclusions.includes(file)) return;
       const curSource = path.join(source, file);
       const curTarget = path.join(target, file);
-      if (fs.lstatSync(curSource).isDirectory()) {
-        copyFolderRecursiveSync(curSource, curTarget, exclusions);
-      } else {
-        fs.copyFileSync(curSource, curTarget);
+      try {
+          if (fs.lstatSync(curSource).isDirectory()) {
+            copyFolderRecursiveSync(curSource, curTarget, exclusions);
+          } else {
+            fs.copyFileSync(curSource, curTarget);
+          }
+      } catch (err) {
+          console.warn(`Skipped file ${file}: ${err.message}`);
       }
     });
   }
@@ -152,11 +148,12 @@ function downloadFile(url, dest, onProgress) {
 
       response.on('end', () => {
         file.end();
+        // Sanity check for zero-byte or error files
         fs.stat(dest, (err, stats) => {
             if (err) reject(err);
-            else if (stats.size < 1024 * 1024) { 
+            else if (stats.size < 1024) { 
                 fs.unlink(dest, () => {});
-                reject(new Error("File too small/corrupt."));
+                reject(new Error("File too small or corrupt."));
             } else resolve();
         });
       });
@@ -181,14 +178,16 @@ function findPhpBinaryDir(startDir) {
   const phpExe = process.platform === 'win32' ? 'php.exe' : 'php';
   if (fs.existsSync(path.join(startDir, phpExe))) return startDir;
 
-  const files = fs.readdirSync(startDir);
-  for (const file of files) {
-    const fullPath = path.join(startDir, file);
-    if (fs.lstatSync(fullPath).isDirectory()) {
-      const found = findPhpBinaryDir(fullPath);
-      if (found) return found;
-    }
-  }
+  try {
+      const files = fs.readdirSync(startDir);
+      for (const file of files) {
+        const fullPath = path.join(startDir, file);
+        if (fs.lstatSync(fullPath).isDirectory()) {
+          const found = findPhpBinaryDir(fullPath);
+          if (found) return found;
+        }
+      }
+  } catch(e) {}
   return null;
 }
 
@@ -218,9 +217,11 @@ function getLocalNodePath() {
         for (const d of dirs) {
             const fullPath = path.join(baseDir, d);
             if (fs.lstatSync(fullPath).isDirectory()) {
-                const nodeExe = path.join(fullPath, 'node.exe');
-                if (fs.existsSync(nodeExe)) return fullPath;
+                // Check for node.exe directly or inside bin depending on zip structure
+                if (fs.existsSync(path.join(fullPath, 'node.exe'))) return fullPath;
             }
+            // Also check root if it was extracted flat
+            if (d === 'node.exe') return baseDir;
         }
     } catch (e) { return null; }
     return null;
@@ -379,7 +380,9 @@ ipcMain.handle('get-php-extensions', async (event, phpPath) => {
 ipcMain.handle('add-php-extension', async (event, { phpPath, filePath }) => {
     try {
         const fileName = path.basename(filePath);
-        fs.copyFileSync(filePath, path.join(phpPath, 'ext', fileName));
+        const extDir = path.join(phpPath, 'ext');
+        if (!fs.existsSync(extDir)) fs.mkdirSync(extDir, { recursive: true });
+        fs.copyFileSync(filePath, path.join(extDir, fileName));
         return { success: true };
     } catch (e) { return { success: false, error: e.message }; }
 });
@@ -400,6 +403,7 @@ ipcMain.handle('download-php', async (event, version) => {
     const archiveUrl = `https://windows.php.net/downloads/releases/archives/${filename}`;
     const urls = version === '7.4' ? [archiveUrl, primaryUrl] : [primaryUrl, archiveUrl];
 
+    // Check file size roughly > 5MB to prevent using corrupt partial downloads
     if (!fs.existsSync(zipPath) || fs.statSync(zipPath).size < 5000000) {
         let downloaded = false;
         for (const url of urls) {
@@ -452,7 +456,6 @@ ipcMain.handle('install-node', async () => {
     const nodeDir = path.join(app.getPath('userData'), 'node-env');
     if (!fs.existsSync(nodeDir)) fs.mkdirSync(nodeDir, { recursive: true });
     
-    // LATEST LTS VERSION (Jod)
     const version = 'v22.11.0'; 
     const filename = `node-${version}-win-x64.zip`;
     const url = `https://nodejs.org/dist/${version}/${filename}`;
@@ -465,12 +468,16 @@ ipcMain.handle('install-node', async () => {
         });
         
         mainWindow.webContents.send('download-progress', { percent: 100, status: 'Extracting Engine...' });
+        
+        // Clean directory but keep zip
         const items = fs.readdirSync(nodeDir);
         for(const i of items) { if(i !== filename) await deleteFolderRobust(path.join(nodeDir, i)); }
         
         await extractZip(zipPath, nodeDir);
+        
+        // Verify
         const local = getLocalNodePath();
-        if (!local) throw new Error("Extraction verification failed.");
+        if (!local) throw new Error("Extraction verification failed: Node.exe not found.");
         
         return { success: true, path: local };
     } catch(e) { return { success: false, error: e.message }; }
@@ -489,20 +496,24 @@ ipcMain.handle('generate-app', async (event, config) => {
     await deleteFolderRobust(wwwDir);
     await deleteFolderRobust(binDir);
 
-    const exclusions = ['vnbuild', '.git', '.vscode', 'node_modules', 'dist', 'release', 'out'];
+    const exclusions = ['vnbuild', '.git', '.vscode', 'node_modules', 'dist', 'release', 'out', '.trash'];
     fs.mkdirSync(wwwDir, { recursive: true });
     copyFolderRecursiveSync(sourceRoot, wwwDir, exclusions);
     
     let iconFileName = 'app-icon.png';
     const defaultIconPath = path.join(__dirname, 'public/appicon.png');
+    
     try {
         if (config.iconPath && fs.existsSync(config.iconPath)) {
             const ext = path.extname(config.iconPath).toLowerCase();
             iconFileName = `app-icon${ext}`;
             fs.copyFileSync(config.iconPath, path.join(buildDir, iconFileName)); 
         } else if (fs.existsSync(defaultIconPath)) {
+            // Fallback to default
             fs.writeFileSync(path.join(buildDir, 'app-icon.png'), fs.readFileSync(defaultIconPath));
         } else {
+            // Last resort: generate empty or fail?
+            // We will fail because electron-builder requires an icon
             return { success: false, error: "MISSING_ICON" };
         }
     } catch(e) { return { success: false, error: "ICON_ERROR: " + e.message }; }
@@ -513,9 +524,9 @@ ipcMain.handle('generate-app', async (event, config) => {
        const phpDest = path.join(binDir, 'php');
        fs.mkdirSync(binDir, { recursive: true });
        copyFolderRecursiveSync(config.phpPath, phpDest, []);
-       if (!fs.existsSync(path.join(phpDest, 'php.exe'))) throw new Error("Failed to copy php.exe.");
+       if (!fs.existsSync(path.join(phpDest, 'php.exe'))) throw new Error("Failed to copy php.exe. Check PHP path.");
        
-       let extensionStr = `extension_dir = "ext"\n`;
+       let extensionStr = `extension_dir = "./ext"\n`;
        if (config.phpExtensions) config.phpExtensions.forEach(ext => { if (ext.trim()) extensionStr += `extension=${ext}\n`; });
        
        let opcacheStr = "";
@@ -551,7 +562,10 @@ ipcMain.handle('build-app', async (event, sourceRoot) => {
                 const conf = JSON.parse(fs.readFileSync(configFile, 'utf8'));
                 const execName = conf.productName + ".exe";
                 sendLog(`Checking for running instances of ${execName}...`);
-                try { execSync(`taskkill /F /IM "${execName}"`, { stdio: 'ignore' }); sendLog('Closed running application instance.'); } catch(e) {}
+                try { 
+                    execSync(`taskkill /F /IM "${execName}"`, { stdio: 'ignore' }); 
+                    sendLog('Closed running application instance.'); 
+                } catch(e) {}
             }
         } catch(e) { sendLog('Warning: Instance check skipped.', true); }
 
@@ -596,7 +610,14 @@ ipcMain.handle('build-app', async (event, sourceRoot) => {
                                 for (const f of files) {
                                     const fullPath = path.join(distPath, f);
                                     if (['.yml', '.yaml', '.blockmap'].some(ext => f.endsWith(ext))) { try { await deleteFolderRobust(fullPath, true); } catch(e) {} }
-                                    if (f === 'win-unpacked' && !config.targetUnpacked) { try { await deleteFolderRobust(fullPath); if (fs.existsSync(fullPath)) forceMoveToTrash(fullPath); } catch (delErr) { forceMoveToTrash(fullPath); } }
+                                    if (f === 'win-unpacked' && !config.targetUnpacked) { 
+                                        try { 
+                                            await deleteFolderRobust(fullPath); 
+                                        } catch (delErr) { 
+                                            // If strict delete fails, move to trash
+                                            forceMoveToTrash(fullPath); 
+                                        } 
+                                    }
                                 }
                             }
                             sendLog('Build Success!'); resolve({ success: true });
@@ -616,6 +637,8 @@ function generatePackageJson(c) {
 
   const extraResources = [];
   if (c.enablePhp) {
+      // Important: ASAR unpacking might be needed for binaries in some configs,
+      // but using extraResources puts them outside ASAR, which is safer for spawn()
       extraResources.push({ "from": "bin/php", "to": "php", "filter": ["**/*"] });
       extraResources.push({ "from": "www", "to": "www_source", "filter": ["**/*"] });
   }
@@ -648,6 +671,10 @@ function generatePackageJson(c) {
 function generateMainJs(c) {
   const iconFile = c.trayIconFileName || 'app-icon.png';
   
+  // NOTE: The PHP Spawn Logic below is CRITICAL.
+  // We must spawn PHP with CWD = PHP Directory.
+  // If we spawn with CWD = DOC_ROOT, PHP cannot find 'php_*.dll' in 'ext' relative path.
+  
   return `const { app, BrowserWindow, Tray, Menu, ipcMain, shell, dialog, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -666,6 +693,8 @@ const isDev = !app.isPackaged;
 const appDataDir = app.getPath('userData');
 const tempDir = app.getPath('temp');
 const instanceId = 'vneo-' + Date.now() + '-' + Math.floor(Math.random() * 1000);
+// Resources: In Prod, they are next to the executable (or in resources folder depending on electron-builder config)
+// Using process.resourcesPath is standard for 'extraResources'
 const resourcesDir = isDev ? path.join(__dirname, 'bin') : process.resourcesPath;
 
 function syncDir(src, dest) {
@@ -675,9 +704,11 @@ function syncDir(src, dest) {
   entries.forEach(entry => {
       const srcPath = path.join(src, entry);
       const destPath = path.join(dest, entry);
-      const stat = fs.statSync(srcPath);
-      if (stat.isDirectory()) syncDir(srcPath, destPath);
-      else try { fs.copyFileSync(srcPath, destPath); } catch(e) {}
+      try {
+        const stat = fs.statSync(srcPath);
+        if (stat.isDirectory()) syncDir(srcPath, destPath);
+        else fs.copyFileSync(srcPath, destPath);
+      } catch(e) {}
   });
 }
 
@@ -693,13 +724,23 @@ function saveState() {
 
 async function setupEnvironment() {
     if (!CONFIG.usePhp) return { docRoot: null, phpDir: null };
+    
     let runtimeRoot;
-    if (CONFIG.dataMode === 'writable') { runtimeRoot = path.join(appDataDir, 'server_root'); } 
-    else { runtimeRoot = path.join(tempDir, CONFIG.title.replace(/[^a-zA-Z0-9]/g,''), instanceId); }
+    if (CONFIG.dataMode === 'writable') { 
+        runtimeRoot = path.join(appDataDir, 'server_root'); 
+    } else { 
+        // Static mode uses temp
+        runtimeRoot = path.join(tempDir, CONFIG.title.replace(/[^a-zA-Z0-9]/g,''), instanceId); 
+    }
+
     const phpSource = path.join(resourcesDir, 'php');
     const wwwSource = isDev ? path.join(__dirname, 'www') : path.join(resourcesDir, 'www_source');
-    if (!fs.existsSync(phpSource)) throw new Error("PHP Runtime missing in resources.");
+    
+    if (!fs.existsSync(phpSource)) throw new Error("PHP Runtime missing in resources. (Looked in: " + phpSource + ")");
+    
+    // Copy web files to runtime root
     try { syncDir(wwwSource, runtimeRoot); } catch (e) { console.error("Setup Error", e); }
+    
     return { docRoot: runtimeRoot, phpDir: phpSource };
 }
 
@@ -710,15 +751,35 @@ async function startPhpServer() {
       const env = await setupEnvironment();
       const phpExe = path.join(env.phpDir, 'php.exe');
       const phpIni = path.join(env.phpDir, 'php.ini');
-      if (!fs.existsSync(phpExe)) return reject(new Error("PHP.exe not found"));
-      phpProcess = spawn(phpExe, ['-S', '127.0.0.1:0', '-t', env.docRoot, '-c', phpIni], { cwd: env.docRoot, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      
+      if (!fs.existsSync(phpExe)) return reject(new Error("PHP.exe not found at " + phpExe));
+
+      // IMPORTANT: CWD must be env.phpDir so PHP can find './ext' DLLs
+      phpProcess = spawn(phpExe, ['-S', '127.0.0.1:0', '-t', env.docRoot, '-c', phpIni], { 
+          cwd: env.phpDir, 
+          windowsHide: true, 
+          stdio: ['ignore', 'pipe', 'pipe'] 
+      });
+
       let portFound = false;
       const timer = setTimeout(() => { if(!portFound) { killPhp(); reject(new Error("PHP Server startup timed out.")); } }, 8000);
+      
       const checkOutput = (data) => {
-          const match = data.toString().match(/http:\\/\\/127\\.0\\.0\\.1:(\\d+)/);
-          if (match && !portFound) { portFound = true; clearTimeout(timer); serverUrl = \`http://127.0.0.1:\${match[1]}/\`; resolve(serverUrl); }
+          const str = data.toString();
+          // Regex to match "http://127.0.0.1:1234" or "http://localhost:1234"
+          // PHP 7.4+ output formats differ slightly
+          const match = str.match(/http:\/\/(?:127\.0\.0\.1|localhost):(\d+)/i);
+          if (match && !portFound) { 
+              portFound = true; 
+              clearTimeout(timer); 
+              serverUrl = \`http://127.0.0.1:\${match[1]}/\`; 
+              resolve(serverUrl); 
+          }
       };
-      phpProcess.stdout.on('data', checkOutput); phpProcess.stderr.on('data', checkOutput);
+      
+      phpProcess.stdout.on('data', checkOutput); 
+      phpProcess.stderr.on('data', checkOutput); // PHP built-in server logs to stderr often
+      
       phpProcess.on('error', (err) => { clearTimeout(timer); reject(err); });
       phpProcess.on('close', (code) => { if(!portFound) { clearTimeout(timer); reject(new Error("PHP Exited unexpectedly Code: " + code)); } });
     } catch (e) { reject(e); }
@@ -731,6 +792,7 @@ function killPhp() {
     try { if (process.platform === 'win32') execSync(\`taskkill /pid \${phpProcess.pid} /f /t\`, { stdio: 'ignore' }); } catch(e) {}
     phpProcess = null;
   }
+  // Cleanup Temp if Static Mode
   if (CONFIG.dataMode === 'static') {
       try { 
           const tempRoot = path.join(tempDir, CONFIG.title.replace(/[^a-zA-Z0-9]/g,''), instanceId);
@@ -751,24 +813,47 @@ function createWindow() {
     webPreferences: { nodeIntegration: false, contextIsolation: true, devTools: ${c.devTools} }
   };
   ${c.iconPath ? `winConfig.icon = path.join(__dirname, '${iconFile}');` : ''}
+  
   mainWindow = new BrowserWindow(winConfig);
   mainWindow.setMenu(null);
+  
   if (CONFIG.saveState && state.isMaximized) mainWindow.maximize();
 
-  if (CONFIG.usePhp && serverUrl) mainWindow.loadURL(serverUrl + CONFIG.entry);
-  else mainWindow.loadFile(path.join(__dirname, 'www', CONFIG.entry));
+  if (CONFIG.usePhp && serverUrl) {
+      mainWindow.loadURL(serverUrl + CONFIG.entry);
+  } else {
+      mainWindow.loadFile(path.join(__dirname, 'www', CONFIG.entry));
+  }
   
   ${c.userAgent ? `mainWindow.webContents.setUserAgent("${c.userAgent}");` : ''}
-  const showTimer = setTimeout(() => { if(mainWindow && !mainWindow.isVisible()) mainWindow.show(); }, 3000);
+  
+  const showTimer = setTimeout(() => { if(mainWindow && !mainWindow.isVisible()) mainWindow.show(); }, 2000);
+  
   mainWindow.once('ready-to-show', () => { clearTimeout(showTimer); mainWindow.show(); });
+  
   mainWindow.on('minimize', (e) => { if (CONFIG.minToTray && tray) { e.preventDefault(); mainWindow.hide(); } });
+  
   mainWindow.on('close', (e) => {
     if (CONFIG.saveState) saveState();
     if (CONFIG.closeToTray && tray && !isQuitting) { e.preventDefault(); mainWindow.hide(); return; }
   });
+
   if (CONFIG.contextMenu) {
-      mainWindow.webContents.on('context-menu', () => { Menu.buildFromTemplate([{ role: 'copy' }, { role: 'paste' }, { type: 'separator' }, { role: 'reload' }]).popup(); });
+      mainWindow.webContents.on('context-menu', () => { 
+        Menu.buildFromTemplate([
+            { role: 'copy' }, { role: 'paste' }, { type: 'separator' }, { role: 'reload' }
+        ]).popup({ window: mainWindow }); 
+      });
   }
+
+  // Open External Links in Browser
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith('http:') || url.startsWith('https:')) {
+      shell.openExternal(url);
+      return { action: 'deny' };
+    }
+    return { action: 'allow' };
+  });
 }
 
 function createTray() {
@@ -788,9 +873,11 @@ const gotLock = CONFIG.singleInstance ? app.requestSingleInstanceLock() : true;
 if (!gotLock) { app.quit(); } 
 else {
   app.on('second-instance', () => { if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.focus(); } });
+  
   app.whenReady().then(async () => {
     try { await startPhpServer(); createWindow(); createTray(); } catch(e) { dialog.showErrorBox("Startup Error", e.message); app.quit(); }
   });
+  
   app.on('window-all-closed', () => { if (CONFIG.runBg && !isQuitting) {} else { app.quit(); } });
   app.on('before-quit', () => { isQuitting = true; killPhp(); });
   app.on('will-quit', () => { killPhp(); });

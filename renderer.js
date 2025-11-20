@@ -290,6 +290,7 @@ async function loadExtensions() {
     error.style.display = 'none';
 
     if(!phpPath) {
+        error.innerText = "PHP Path not selected.";
         error.style.display = 'block';
         return;
     }
@@ -299,6 +300,7 @@ async function loadExtensions() {
     loader.style.display = 'none';
     
     if(!availableExtensions || availableExtensions.length === 0) {
+        error.innerText = "No extensions found in 'ext' folder. Is this a valid PHP directory?";
         error.style.display = 'block';
     } else {
         renderExtensions();
@@ -411,8 +413,8 @@ function getAppConfig() {
     if(usePhp && !phpPath) { alert('PHP Path is required'); return null; }
     return {
         sourcePath: document.getElementById('sourcePath').value,
-        productName: document.getElementById('productName').value,
-        appName: document.getElementById('appName').value,
+        productName: document.getElementById('productName').value || "My App",
+        appName: document.getElementById('appName').value || "com.myapp." + Date.now(),
         version: document.getElementById('appVersion').value,
         author: document.getElementById('appAuthor').value,
         entryPoint: document.getElementById('entryPoint').value,
@@ -511,7 +513,10 @@ document.getElementById('btnInstallNode').onclick = async () => {
 
 document.getElementById('btnSelectPhp').onclick = async () => {
     const p = await window.api.selectFolder();
-    if(p) { document.getElementById('phpPath').value = p; loadExtensions(); }
+    if(p) { 
+        document.getElementById('phpPath').value = p; 
+        loadExtensions(); 
+    }
 };
 document.getElementById('btnSelectIcon').onclick = async () => {
     const p = await window.api.selectFile(['ico','png','icns']);
