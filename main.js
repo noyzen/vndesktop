@@ -1,5 +1,5 @@
 
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const https = require('https');
@@ -202,6 +202,33 @@ ipcMain.handle('select-file', async (event, extensions) => {
     properties: ['openFile']
   });
   return result.filePaths[0];
+});
+
+ipcMain.handle('copy-to-clipboard', async (event, text) => {
+  clipboard.writeText(text);
+  return true;
+});
+
+ipcMain.handle('get-php-cache', async () => {
+    const cacheDir = path.join(app.getPath('userData'), 'php-cache');
+    const results = {};
+    
+    if (!fs.existsSync(cacheDir)) return results;
+    
+    // Check standard versions
+    const versions = ['8.3', '8.2', '8.1'];
+    
+    for (const ver of versions) {
+        const possiblePath = path.join(cacheDir, `php-${ver}`);
+        if (fs.existsSync(possiblePath)) {
+            const binaryDir = findPhpBinaryDir(possiblePath);
+            if (binaryDir) {
+                results[ver] = binaryDir;
+            }
+        }
+    }
+    
+    return results;
 });
 
 ipcMain.handle('download-php', async (event, version) => {

@@ -7,6 +7,8 @@ contextBridge.exposeInMainWorld('api', {
   generateApp: (config) => ipcRenderer.invoke('generate-app', config),
   downloadPhp: (version) => ipcRenderer.invoke('download-php', version),
   buildApp: (targetPath) => ipcRenderer.invoke('build-app', targetPath),
+  getPhpCache: () => ipcRenderer.invoke('get-php-cache'),
+  copyToClipboard: (text) => ipcRenderer.invoke('copy-to-clipboard', text),
   onDownloadProgress: (callback) => ipcRenderer.on('download-progress', (_event, value) => callback(value))
 });
 

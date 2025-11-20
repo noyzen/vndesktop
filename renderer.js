@@ -67,14 +67,14 @@ document.getElementById('btnClearLogs').addEventListener('click', () => {
   consoleOutput.innerHTML = '';
 });
 
-document.getElementById('btnCopyLogs').addEventListener('click', () => {
+document.getElementById('btnCopyLogs').addEventListener('click', async () => {
   const text = consoleOutput.innerText;
-  navigator.clipboard.writeText(text).then(() => {
-     const btn = document.getElementById('btnCopyLogs');
-     const originalHtml = btn.innerHTML;
-     btn.innerHTML = '<i class="fa-solid fa-check"></i> Copied';
-     setTimeout(() => btn.innerHTML = originalHtml, 2000);
-  });
+  await window.api.copyToClipboard(text);
+  
+  const btn = document.getElementById('btnCopyLogs');
+  const originalHtml = btn.innerHTML;
+  btn.innerHTML = '<i class="fa-solid fa-check"></i> Copied';
+  setTimeout(() => btn.innerHTML = originalHtml, 2000);
 });
 
 // --- PHP EXTENSION MANAGER UI ---
@@ -109,7 +109,74 @@ function toggleExtension(ext) {
 
 renderExtensions();
 
-// --- DOWNLOADER LOGIC ---
+// --- PHP CACHE & DOWNLOADER LOGIC ---
+
+// Cache for installed versions
+let phpCache = {};
+
+async function refreshPhpStatus() {
+    try {
+        phpCache = await window.api.getPhpCache();
+        updatePhpUiState();
+    } catch (e) {
+        console.error("Failed to load PHP cache", e);
+    }
+}
+
+const phpSelect = document.getElementById('phpVersionSelect');
+const btnDownload = document.getElementById('btnDownloadPhp');
+const phpPathInput = document.getElementById('phpPath');
+const phpStatusBadge = document.getElementById('phpStatusBadge');
+
+// Update UI based on selection and cache
+function updatePhpUiState() {
+    const selectedVer = phpSelect.value;
+    const cached = phpCache[selectedVer];
+    
+    // Update dropdown options text
+    Array.from(phpSelect.options).forEach(opt => {
+        const ver = opt.value;
+        const originalText = opt.getAttribute('data-orig') || opt.text;
+        if (!opt.hasAttribute('data-orig')) opt.setAttribute('data-orig', originalText);
+        
+        if (phpCache[ver]) {
+            opt.text = `✓ ${originalText} (Installed)`;
+            opt.style.fontWeight = 'bold';
+            opt.style.color = '#4ade80';
+        } else {
+            opt.text = originalText;
+            opt.style.fontWeight = 'normal';
+            opt.style.color = '#ccc';
+        }
+    });
+
+    if (cached) {
+        phpStatusBadge.innerHTML = '<span style="color:#4ade80"><i class="fa-solid fa-check-circle"></i> Ready to use</span>';
+        btnDownload.innerHTML = '<i class="fa-solid fa-rotate-right"></i> Re-Download';
+        btnDownload.classList.add('secondary');
+        
+        // Auto-fill path if empty or pointing to another cache
+        if (!phpPathInput.value || phpPathInput.value.includes('php-cache')) {
+            phpPathInput.value = cached;
+        }
+    } else {
+        phpStatusBadge.innerHTML = '<span style="color:#fbbf24"><i class="fa-solid fa-circle-exclamation"></i> Not installed</span>';
+        btnDownload.innerHTML = '<i class="fa-solid fa-cloud-arrow-down"></i> Download & Install';
+        btnDownload.classList.remove('secondary');
+        
+        // Clear path if it was auto-filled before
+        if (phpPathInput.value.includes('php-cache')) {
+            phpPathInput.value = '';
+        }
+    }
+}
+
+// Listener for dropdown change
+phpSelect.addEventListener('change', updatePhpUiState);
+
+// Initial check on load
+refreshPhpStatus();
+
 
 if (window.api && window.api.onDownloadProgress) {
     window.api.onDownloadProgress((data) => {
@@ -141,8 +208,8 @@ if (window.api && window.api.onDownloadProgress) {
     });
 }
 
-document.getElementById('btnDownloadPhp').addEventListener('click', async () => {
-  const version = document.getElementById('phpVersionSelect').value;
+btnDownload.addEventListener('click', async () => {
+  const version = phpSelect.value;
   const modal = document.getElementById('progressModal');
   
   log(`Initializing download for PHP ${version}...`, 'info');
@@ -159,10 +226,13 @@ document.getElementById('btnDownloadPhp').addEventListener('click', async () => 
     modal.classList.remove('active'); 
     
     if (result.success) {
-      document.getElementById('phpPath').value = result.path;
       log(`PHP ${version} installed successfully!`, 'success');
       log(`Location: ${result.path}`, 'info');
-      setTimeout(() => alert(`PHP ${version} downloaded, verified, and linked!`), 100);
+      
+      // Refresh cache and UI
+      await refreshPhpStatus();
+      
+      setTimeout(() => alert(`PHP ${version} downloaded and verified!`), 100);
     } else {
       log(`Download Error: ${result.error}`, 'error');
       alert(`Error: ${result.error}`);
