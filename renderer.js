@@ -90,12 +90,9 @@ renderExtensions();
 
 // --- DOWNLOADER LOGIC ---
 
-// Progress Logic Listener
-window.electron = window.electron || {}; // Safety check
-
-if (window.api) { // Ensure API exists
-    const { ipcRenderer } = require('electron');
-    ipcRenderer.on('download-progress', (event, data) => {
+// Listen for progress events from Main Process via Preload API
+if (window.api && window.api.onDownloadProgress) {
+    window.api.onDownloadProgress((data) => {
         const modal = document.getElementById('progressModal');
         const bar = document.getElementById('progressBar');
         const percentTxt = document.getElementById('progressPercent');
@@ -123,15 +120,22 @@ document.getElementById('btnDownloadPhp').addEventListener('click', async () => 
   
   log(`Initializing download for PHP ${version}...`, 'info');
   
+  // Show modal immediately with 0%
+  modal.classList.add('active');
+  document.getElementById('progressBar').style.width = '0%';
+  document.getElementById('progressPercent').innerText = '0%';
+  document.getElementById('progressDetail').innerText = 'Connecting...';
+  
   try {
     const result = await window.api.downloadPhp(version);
     
-    modal.classList.remove('active'); // Hide modal
+    modal.classList.remove('active'); // Hide modal on finish
     
     if (result.success) {
       document.getElementById('phpPath').value = result.path;
       log(`PHP ${version} installed & verified!`, 'success');
-      alert(`PHP ${version} downloaded, verified, and ready!`);
+      // Small timeout to ensure modal is gone before alerting
+      setTimeout(() => alert(`PHP ${version} downloaded, verified, and ready!`), 100);
     } else {
       log(`Download Error: ${result.error}`, 'error');
       alert(`Error: ${result.error}`);
