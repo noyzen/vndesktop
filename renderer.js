@@ -1,17 +1,16 @@
 
 // View Elements
-const viewBoot = document.getElementById('view-boot');
 const viewManager = document.getElementById('view-manager');
 const viewEditor = document.getElementById('view-editor');
 const projectListEl = document.getElementById('projectList');
 
-// Boot UI
-const bootStatusNode = document.getElementById('bootStatusNode');
-const bootStatusNpm = document.getElementById('bootStatusNpm');
-const bootActionArea = document.getElementById('bootActionArea');
-const bootProgress = document.getElementById('bootProgress');
-const bootProgressFill = document.getElementById('bootProgressFill');
-const bootProgressText = document.getElementById('bootProgressText');
+// PM UI
+const btnNewProject = document.getElementById('btnNewProject');
+const nodeInstallContainer = document.getElementById('nodeInstallContainer');
+const btnInstallNodeManager = document.getElementById('btnInstallNodeManager');
+const installProgress = document.getElementById('installProgress');
+const installProgressFill = document.getElementById('installProgressFill');
+const installProgressText = document.getElementById('installProgressText');
 
 // Modals & Overlays
 const successModal = document.getElementById('successModal');
@@ -41,15 +40,15 @@ let phpCache = {};
 // --- UI HELPERS ---
 
 function showManager() {
-    viewBoot.classList.add('hidden');
     viewEditor.classList.add('hidden');
     viewManager.classList.remove('hidden');
     currentProjectPath = null;
-    renderProjectList();
+    
+    // Re-run checks every time we return to manager
+    checkSystemRequirements();
 }
 
 function showEditor() {
-    viewBoot.classList.add('hidden');
     viewManager.classList.add('hidden');
     viewEditor.classList.remove('hidden');
 }
@@ -79,78 +78,58 @@ document.getElementById('btnCopyLog').onclick = async () => {
 
 // --- STARTUP & DEPENDENCY CHECK ---
 
-async function initApp() {
-    bootActionArea.innerHTML = '';
-    bootProgress.style.display = 'none';
-    bootStatusNode.className = 'boot-item-status status-loading';
-    bootStatusNode.innerText = 'Checking...';
-    bootStatusNpm.className = 'boot-item-status status-loading';
-    bootStatusNpm.innerText = 'Checking...';
-
+async function checkSystemRequirements() {
+    // Warm up cache silently
     window.api.getPhpCache().then(c => phpCache = c);
-
-    await new Promise(r => setTimeout(r, 600));
     
+    // Check Node
     const nodeCheck = await window.api.checkNode();
     
     if(nodeCheck.installed) {
-        bootStatusNode.className = 'boot-item-status status-ok';
-        bootStatusNode.innerText = nodeCheck.nodeVersion + (nodeCheck.local ? ' (Portable)' : ' (System)');
-        
-        if(nodeCheck.npmVersion) {
-            bootStatusNpm.className = 'boot-item-status status-ok';
-            bootStatusNpm.innerText = nodeCheck.npmVersion;
-        } else {
-             bootStatusNpm.className = 'boot-item-status status-err';
-             bootStatusNpm.innerText = 'Not Found';
-        }
-
-        bootActionArea.innerHTML = '<div style="color:#4ade80; font-weight:600; animation: fadeIn 0.5s;">System Verified</div>';
-        setTimeout(() => {
-            showManager();
-        }, 1200);
+        // System Ready
+        btnNewProject.style.display = 'flex';
+        nodeInstallContainer.style.display = 'none';
+        projectListEl.classList.remove('disabled-area');
+        renderProjectList();
     } else {
-        bootStatusNode.className = 'boot-item-status status-err';
-        bootStatusNode.innerText = 'Not Installed';
-        bootStatusNpm.className = 'boot-item-status status-err';
-        bootStatusNpm.innerText = 'Not Installed';
-
-        const btn = document.createElement('button');
-        btn.innerHTML = '<i class="fa-brands fa-node-js"></i> Auto-Install Node.js LTS (v22)';
-        btn.onclick = performAutoInstall;
-        bootActionArea.innerHTML = '';
-        bootActionArea.appendChild(btn);
+        // System Missing Node
+        btnNewProject.style.display = 'none';
+        nodeInstallContainer.style.display = 'flex';
+        projectListEl.classList.add('disabled-area');
+        renderProjectList(); // Render list but visualy disabled
     }
 }
 
-async function performAutoInstall() {
-    bootActionArea.innerHTML = '<div style="color:#aaa;">Initializing installation...</div>';
-    bootProgress.style.display = 'block';
+btnInstallNodeManager.onclick = async () => {
+    btnInstallNodeManager.style.display = 'none';
+    installProgress.style.display = 'block';
     
     const result = await window.api.installNode();
     
     if(result.success) {
-        bootActionArea.innerHTML = '<div style="color:#4ade80; font-weight:600;">Installation Complete!</div>';
-        setTimeout(initApp, 1000); 
+        installProgressText.innerText = 'Installation Complete!';
+        setTimeout(() => {
+            installProgress.style.display = 'none';
+            btnInstallNodeManager.style.display = 'inline-flex';
+            checkSystemRequirements();
+        }, 1000);
     } else {
-        bootActionArea.innerHTML = `<div style="color:#f87171;">Error: ${result.error}</div>`;
-        const btn = document.createElement('button');
-        btn.innerText = "Retry";
-        btn.style.marginTop = "10px";
-        btn.onclick = performAutoInstall;
-        bootActionArea.appendChild(btn);
+        installProgress.style.display = 'none';
+        btnInstallNodeManager.style.display = 'inline-flex';
+        alert("Installation Failed: " + result.error);
     }
-}
+};
 
 window.api.onDownloadProgress((data) => {
     if(data.type === 'build-log') {
         log(data.msg, data.error ? 'error' : 'info');
         return;
     }
-    if(viewBoot.classList.contains('hidden') === false) {
+    // Install Progress
+    if(!viewManager.classList.contains('hidden')) {
         const p = Math.round(data.percent);
-        bootProgressFill.style.width = `${p}%`;
-        bootProgressText.innerText = data.status || `${p}%`;
+        installProgressFill.style.width = `${p}%`;
+        installProgressText.innerText = data.status || `${p}%`;
     }
 });
 
@@ -544,4 +523,6 @@ document.getElementById('btnDownloadPhp').onclick = async () => {
     } else { alert(res.error); }
 };
 
-initApp();
+// Startup
+showManager();
+    

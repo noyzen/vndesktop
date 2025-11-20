@@ -55,20 +55,6 @@
       .checkbox-card input:checked ~ .custom-check:after { display: block; }
       .checkbox-card input:checked ~ span { color: white; text-shadow: 0 0 10px rgba(255,255,255,0.3); font-weight: 500; }
       
-      /* --- STARTUP VIEW --- */
-      #view-boot { flex-direction: column; align-items: center; justify-content: center; background: #0f0f13; z-index: 9999; }
-      .boot-card { background: rgba(30, 30, 35, 0.6); backdrop-filter: blur(20px); border: 1px solid var(--border); padding: 50px; border-radius: 24px; width: 450px; text-align: center; box-shadow: 0 20px 50px rgba(0,0,0,0.5); animation: fadeIn 0.5s ease-out; }
-      .boot-logo { font-size: 3rem; font-weight: 900; background: var(--gradient); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 10px; letter-spacing: -2px; }
-      .boot-status-container { margin: 30px 0; display: flex; flex-direction: column; gap: 15px; background: rgba(0,0,0,0.2); padding: 20px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.05); }
-      .boot-item { display: flex; align-items: center; justify-content: space-between; color: var(--text-muted); font-size: 0.9rem; }
-      .boot-item-icon { width: 24px; display: flex; justify-content: center; font-size: 1.2rem; }
-      .boot-item-label { flex: 1; text-align: left; padding-left: 15px; font-weight: 500; }
-      .boot-item-status { font-family: 'Consolas', monospace; font-size: 0.8rem; }
-      .status-loading { color: #60a5fa; animation: pulse 1.5s infinite; }
-      .status-ok { color: #4ade80; }
-      .status-err { color: #f87171; }
-      @keyframes pulse { 50% { opacity: 0.5; } }
-      .boot-action-area { min-height: 50px; display: flex; justify-content: center; align-items: center; flex-direction: column; gap: 10px; }
       .progress-bar-container { width: 100%; height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px; overflow: hidden; display: none; position: relative; }
       .progress-bar-fill { height: 100%; background: var(--primary); width: 0%; transition: width 0.1s linear; }
       .progress-text { position: absolute; top: -25px; left: 0; width: 100%; text-align: center; font-size: 0.75rem; color: #aaa; }
@@ -81,13 +67,15 @@
       @keyframes pulseGlow { 0% { opacity: 0.1; transform: translate(-50%, -50%) scale(0.8); } 100% { opacity: 0.2; transform: translate(-50%, -50%) scale(1.2); } }
       .pm-logo { font-size: 4.5rem; font-weight: 900; background: var(--gradient); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 10px; letter-spacing: -3px; filter: drop-shadow(0 10px 30px rgba(59, 130, 246, 0.4)); }
       .pm-subtitle { font-size: 1.2rem; color: var(--text-muted); margin-bottom: 40px; font-weight: 300; letter-spacing: 0.5px; }
-      .pm-card-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 15px; padding: 10px; }
+      .pm-card-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 15px; padding: 10px; transition: 0.3s; }
+      .pm-card-list.disabled-area { opacity: 0.4; pointer-events: none; filter: grayscale(0.8); }
+      
       .project-card { background: var(--bg-panel); backdrop-filter: var(--glass); border: 1px solid var(--border); padding: 25px; border-radius: 16px; display: flex; align-items: center; justify-content: space-between; cursor: pointer; transition: all 0.3s; position: relative; overflow: hidden; }
       .project-card:hover { background: rgba(255,255,255,0.08); border-color: var(--primary); transform: translateY(-3px) scale(1.01); box-shadow: 0 10px 30px -10px rgba(0,0,0,0.5); }
       .project-card.last-used { border-left: 4px solid var(--primary); background: linear-gradient(90deg, rgba(59, 130, 246, 0.05) 0%, rgba(30, 30, 35, 0.7) 50%); }
       .project-info h3 { margin: 0 0 5px 0; color: white; font-size: 1.1rem; }
       .project-info p { margin: 0; color: #888; font-size: 0.85rem; font-family: 'Consolas', monospace; }
-      .pm-btn-new { padding: 20px; border-radius: 16px; border: 2px dashed var(--border); background: transparent; color: var(--text-muted); font-size: 1.1rem; transition: 0.2s; display: flex; align-items: center; justify-content: center; gap: 10px; box-shadow: none; margin-bottom: 20px; }
+      .pm-btn-new { padding: 20px; border-radius: 16px; border: 2px dashed var(--border); background: transparent; color: var(--text-muted); font-size: 1.1rem; transition: 0.2s; display: flex; align-items: center; justify-content: center; gap: 10px; box-shadow: none; margin-bottom: 20px; width: 100%; }
       .pm-btn-new:hover { border-color: var(--primary); color: var(--primary); background: rgba(59, 130, 246, 0.05); transform: none; }
       .btn-delete-project { background: rgba(239, 68, 68, 0.15); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.2); width: 45px; height: 45px; min-width: 45px; padding: 0; border-radius: 12px; display: flex; align-items: center; justify-content: center; transition: all 0.2s; cursor: pointer; z-index: 5; position: relative; }
       .btn-delete-project:hover { background: #ef4444; border-color: #ef4444; box-shadow: 0 0 15px rgba(239, 68, 68, 0.5); transform: scale(1.1); color: white; }
@@ -154,36 +142,6 @@
 </head>
 <body>
 
-    <!-- BOOT SCREEN -->
-    <div id="view-boot" class="view-section">
-        <div class="boot-card">
-            <div class="boot-logo">VisualNEO</div>
-            <div style="color:#aaa; margin-bottom:10px;">Environment Integrity Check</div>
-            
-            <div class="boot-status-container">
-                <div class="boot-item">
-                    <div class="boot-item-icon"><i class="fa-brands fa-node-js" style="color:#6cc24a;"></i></div>
-                    <div class="boot-item-label">Node.js Runtime</div>
-                    <div class="boot-item-status status-loading" id="bootStatusNode">Checking...</div>
-                </div>
-                <div class="boot-item">
-                    <div class="boot-item-icon"><i class="fa-brands fa-npm" style="color:#cb3837;"></i></div>
-                    <div class="boot-item-label">NPM Manager</div>
-                    <div class="boot-item-status status-loading" id="bootStatusNpm">Checking...</div>
-                </div>
-            </div>
-
-            <div class="boot-action-area" id="bootActionArea">
-                <div style="color:#666; font-size:0.9rem;">Verifying system dependencies...</div>
-            </div>
-            
-            <div class="progress-bar-container" id="bootProgress" style="margin-top:25px;">
-                <div class="progress-text" id="bootProgressText">Downloading...</div>
-                <div class="progress-bar-fill" id="bootProgressFill"></div>
-            </div>
-        </div>
-    </div>
-
     <!-- SUCCESS MODAL -->
     <div id="successModal" class="modal-glass">
         <div class="modal-box">
@@ -203,10 +161,30 @@
             <div class="pm-hero">
                 <div class="pm-logo">VisualNEO Desk</div>
                 <div class="pm-subtitle">Professional Desktop Application Compiler</div>
-                <button class="pm-btn-new" id="btnNewProject">
-                    <i class="fa-solid fa-plus"></i> Create New Project
-                </button>
+                
+                <!-- Actions Area -->
+                <div id="pm-actions">
+                     <button class="pm-btn-new" id="btnNewProject">
+                        <i class="fa-solid fa-plus"></i> Create New Project
+                     </button>
+                     
+                     <!-- Missing Node.js Alert & Install -->
+                     <div id="nodeInstallContainer" style="display:none; flex-direction:column; align-items:center; gap:15px; background:rgba(220, 38, 38, 0.1); padding:25px; border-radius:16px; border:1px solid rgba(220, 38, 38, 0.3); max-width: 500px; margin: 0 auto;">
+                         <div style="color:#fca5a5; font-weight:600; font-size: 1.1rem;"><i class="fa-brands fa-node-js"></i> System Requirement Missing</div>
+                         <div style="color:#d1d5db; font-size:0.9rem; line-height: 1.5;">VisualNEO Desk requires Node.js to compile applications. Please install it to continue.</div>
+                         
+                         <button id="btnInstallNodeManager" style="background: #e11d48; box-shadow: 0 4px 12px rgba(225, 29, 72, 0.3);">
+                            <i class="fa-solid fa-download"></i> Install Node.js LTS
+                         </button>
+                         
+                         <div class="progress-bar-container" id="installProgress" style="width:100%; max-width:300px; margin-top:10px; display:none;">
+                            <div class="progress-text" id="installProgressText">Downloading...</div>
+                            <div class="progress-bar-fill" id="installProgressFill"></div>
+                        </div>
+                     </div>
+                </div>
             </div>
+            
             <div style="color: var(--text-muted); font-size: 0.75rem; margin-bottom: 15px; text-transform: uppercase; letter-spacing: 1px; font-weight:700; border-bottom:1px solid var(--border); padding-bottom:10px;">Recent Projects</div>
             <div id="projectList" class="pm-card-list"></div>
         </div>
@@ -369,3 +347,4 @@
     <script src="./renderer.js"></script>
 </body>
 </html>
+    
