@@ -664,19 +664,26 @@ ipcMain.handle('generate-app', async (event, config) => {
     // We explicitly copy the icon to vnbuild so it is included in the bundle
     // Preserve extension to ensure Tray and Window icon consistency (especially for .ico)
     let iconFileName = 'app-icon.png';
-    if (config.iconPath && fs.existsSync(config.iconPath)) {
-        const ext = path.extname(config.iconPath).toLowerCase();
-        iconFileName = `app-icon${ext}`;
-        const iconDest = path.join(buildDir, iconFileName);
-        try { 
+    const defaultIconPath = path.join(__dirname, 'public/appicon.png');
+
+    try {
+        if (config.iconPath && fs.existsSync(config.iconPath)) {
+            const ext = path.extname(config.iconPath).toLowerCase();
+            iconFileName = `app-icon${ext}`;
+            const iconDest = path.join(buildDir, iconFileName);
             fs.copyFileSync(config.iconPath, iconDest); 
-        } catch(e) { 
-            // Fallback
+        } 
+        else if (fs.existsSync(defaultIconPath)) {
+            // Use read/write to ensure ASAR compatibility
+            fs.writeFileSync(path.join(buildDir, 'app-icon.png'), fs.readFileSync(defaultIconPath));
             iconFileName = 'app-icon.png';
-            fs.copyFileSync(path.join(__dirname, 'public/appicon.png'), path.join(buildDir, iconFileName));
+        } else {
+            // Critical failure: No icon available.
+            // Returning specific error for Renderer to handle.
+            return { success: false, error: "MISSING_ICON" };
         }
-    } else {
-        fs.copyFileSync(path.join(__dirname, 'public/appicon.png'), path.join(buildDir, 'app-icon.png'));
+    } catch(e) { 
+        return { success: false, error: "ICON_ERROR: " + e.message };
     }
     
     config.trayIconFileName = iconFileName;
@@ -1183,6 +1190,8 @@ function createTray() {
      // Robust check for icon existence
      if(fs.existsSync(iconPath)) {
          const image = nativeImage.createFromPath(iconPath);
+         // Standardize icon for tray (16x16 helps on some Windows setups if standard PNG is large)
+         // but mostly just ensuring the file exists is enough.
          tray = new Tray(image);
          tray.setToolTip(CONFIG.title);
          tray.setContextMenu(Menu.buildFromTemplate([
@@ -1192,6 +1201,7 @@ function createTray() {
          tray.on('click', () => mainWindow.isVisible() ? mainWindow.hide() : mainWindow.show());
      }
   } catch (e) {
+     console.error("Tray Error:", e);
      // Fallback if tray creation fails
      if(mainWindow) mainWindow.setSkipTaskbar(false);
   }

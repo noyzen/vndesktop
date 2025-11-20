@@ -422,7 +422,23 @@ btnBuild.onclick = async () => {
         log('Initializing Build Sequence...');
         
         const genRes = await window.api.generateApp(config);
-        if(!genRes.success) throw new Error(genRes.error);
+        
+        if(!genRes.success) {
+            if (genRes.error === 'MISSING_ICON') {
+                alert("Icon Missing!\n\nA desktop application requires an icon. The default icon could not be found.\n\nPlease select an .ico or .png file in the 'App Branding' section.");
+                // Navigate to tab
+                document.querySelector('[data-tab="build"]').click();
+                // Highlight button
+                const btn = document.getElementById('btnSelectIcon');
+                btn.style.borderColor = 'red';
+                btn.style.boxShadow = '0 0 10px red';
+                setTimeout(() => { btn.style.borderColor = ''; btn.style.boxShadow = ''; }, 2000);
+                
+                btnBuild.classList.remove('loading');
+                return;
+            }
+            throw new Error(genRes.error);
+        }
         
         log('Configuration Generated.');
         log('Starting Electron Builder...');
