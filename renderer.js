@@ -194,20 +194,32 @@ phpToggle.addEventListener('change', () => {
   }
 });
 
-// Persistence UI Logic
+// Persistence UI Logic - FIXED
 function updatePersistenceUI() {
     document.querySelectorAll('.radio-card').forEach(el => el.classList.remove('selected'));
+    
     if(radioStatic.checked) {
         document.getElementById('card-mode-static').classList.add('selected');
-        hintEl.innerHTML = '<i class="fa-solid fa-info-circle"></i> <b>Static Mode:</b> Files are read from the installation folder. Writing files inside the app folder will usually fail (Read-Only).';
+        hintEl.style.borderLeftColor = '#999';
+        hintEl.style.background = '#222';
+        hintEl.innerHTML = '<i class="fa-solid fa-lock"></i> <b>Static Mode:</b> Application runs directly from installation path. File system is treated as Read-Only.';
     } else {
         document.getElementById('card-mode-writable').classList.add('selected');
-        hintEl.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> <b>Writable Mode:</b> On first run, "www" folder will be copied to <code>%AppData%/YourAppID</code>. Uninstalling the EXE will <b>NOT</b> remove these data files automatically.';
+        hintEl.style.borderLeftColor = 'var(--accent)';
+        hintEl.style.background = 'rgba(61, 156, 216, 0.1)';
+        hintEl.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> <b>Writable Mode:</b> Application files are extracted to <code>%AppData%</code> on first run. <b>Note:</b> Uninstalling the .exe will NOT delete the data in AppData automatically.';
     }
 }
 
-document.querySelectorAll('input[name="dataMode"]').forEach(el => {
-    el.addEventListener('change', updatePersistenceUI);
+// Manual click handler for custom radio cards
+document.querySelectorAll('.radio-card').forEach(card => {
+    card.addEventListener('click', () => {
+        const input = card.querySelector('input[type="radio"]');
+        if(input) {
+            input.checked = true;
+            updatePersistenceUI();
+        }
+    });
 });
 
 // Logger
