@@ -14,7 +14,7 @@ const portfinder = require('portfinder');
 async function deleteFolderRobust(targetPath) {
     if (!fs.existsSync(targetPath)) return;
     
-    const maxRetries = 5;
+    const maxRetries = 10;
     for (let i = 0; i < maxRetries; i++) {
         try {
             fs.rmSync(targetPath, { recursive: true, force: true });
@@ -22,10 +22,12 @@ async function deleteFolderRobust(targetPath) {
         } catch (e) {
             if (i === maxRetries - 1) {
                 console.error(`Failed to delete ${targetPath} after retries: ${e.message}`);
-                // We don't throw here to allow the process to continue, but we log it.
+                // Don't throw, let the caller decide if this is fatal, but usually it is.
+                throw e;
             } else {
-                // Wait 500ms before retry
-                await new Promise(resolve => setTimeout(resolve, 500));
+                // Exponential backoff: 100, 200, 400, 800...
+                const delay = 100 * Math.pow(2, i);
+                await new Promise(resolve => setTimeout(resolve, delay));
             }
         }
     }
@@ -174,8 +176,6 @@ function getLocalNodePath() {
     
     try {
         const dirs = fs.readdirSync(baseDir);
-        // Search for extracted folder containing node.exe
-        // Usually node-vXX.XX.X-win-x64
         for (const d of dirs) {
             const fullPath = path.join(baseDir, d);
             if (fs.lstatSync(fullPath).isDirectory()) {
@@ -193,7 +193,6 @@ function getBuildEnv() {
     const local = getLocalNodePath();
     const env = { ...process.env };
     if (local) {
-        // Prepend local node path to PATH so it takes precedence
         env.PATH = local + path.delimiter + env.PATH;
     }
     return env;
@@ -226,7 +225,7 @@ function getWindowState() {
       return JSON.parse(fs.readFileSync(windowStateFile, 'utf8'));
     }
   } catch (e) {}
-  return { width: 1200, height: 900 }; // Defaults
+  return { width: 1200, height: 900 };
 }
 
 function saveWindowState(win) {
@@ -259,6 +258,7 @@ const createWindow = () => {
     backgroundColor: '#121212',
     frame: true, 
     autoHideMenuBar: true, 
+    title: "VisualNEO Desk",
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
@@ -331,7 +331,6 @@ ipcMain.handle('add-project', async (e, folderPath) => {
     });
   }
   
-  // Sort by last used
   list.sort((a, b) => b.lastUsed - a.lastUsed);
   saveProjectsList(list);
   return list;
@@ -450,7 +449,6 @@ ipcMain.handle('check-node-install', async () => {
     return new Promise((resolve) => {
         exec(`${npmCmd} -v`, { env }, (err, stdout) => {
             if (err) {
-                // Not found
                 resolve({ installed: false, local: false });
             } else {
                 const localPath = getLocalNodePath();
@@ -469,7 +467,7 @@ ipcMain.handle('install-node', async () => {
     const nodeDir = path.join(app.getPath('userData'), 'node-env');
     if (!fs.existsSync(nodeDir)) fs.mkdirSync(nodeDir, { recursive: true });
     
-    const version = 'v20.18.0'; // LTS Iron
+    const version = 'v20.18.0';
     const filename = `node-${version}-win-x64.zip`;
     const url = `https://nodejs.org/dist/${version}/${filename}`;
     const zipPath = path.join(nodeDir, filename);
@@ -483,7 +481,6 @@ ipcMain.handle('install-node', async () => {
         
         mainWindow.webContents.send('download-progress', { percent: 100, status: 'Extracting Engine...' });
         
-        // Clean old
         const items = fs.readdirSync(nodeDir);
         for(const i of items) {
             if(i !== filename) await deleteFolderRobust(path.join(nodeDir, i));
@@ -491,7 +488,6 @@ ipcMain.handle('install-node', async () => {
         
         await extractZip(zipPath, nodeDir);
         
-        // Verify
         const local = getLocalNodePath();
         if (!local) throw new Error("Extraction verification failed.");
         
@@ -510,14 +506,13 @@ ipcMain.handle('generate-app', async (event, config) => {
     const buildDir = path.join(sourceRoot, 'vnbuild');
     const wwwDir = path.join(buildDir, 'www');
     const binDir = path.join(buildDir, 'bin');
-    const distDir = path.join(buildDir, 'dist');
     
+    // Note: We do NOT delete dist here immediately, the build command handles it.
+    // But we do clean intermediate folders.
     if (!fs.existsSync(buildDir)) fs.mkdirSync(buildDir, { recursive: true });
     
-    // Clean previous build files with robust deletion
     await deleteFolderRobust(wwwDir);
     await deleteFolderRobust(binDir);
-    await deleteFolderRobust(distDir);
 
     const exclusions = ['vnbuild', '.git', '.vscode', 'node_modules', 'dist', 'release', 'out'];
     fs.mkdirSync(wwwDir, { recursive: true });
@@ -564,7 +559,6 @@ ${extensionStr}
     fs.writeFileSync(path.join(buildDir, 'main.js'), generateMainJs(config));
     fs.writeFileSync(path.join(buildDir, 'build.bat'), `@echo off\nnpm install && npm run build\npause`);
 
-    // Save config persistence
     const configFile = path.join(buildDir, 'visualneo.json');
     fs.writeFileSync(configFile, JSON.stringify(config, null, 2));
 
@@ -576,7 +570,7 @@ ${extensionStr}
 });
 
 ipcMain.handle('build-app', async (event, sourceRoot) => {
-    return new Promise((resolve, reject) => {
+    return new Promise(async (resolve, reject) => {
         const isWin = process.platform === 'win32';
         const npmCmd = isWin ? 'npm.cmd' : 'npm';
         const buildDir = path.join(sourceRoot, 'vnbuild');
@@ -589,6 +583,39 @@ ipcMain.handle('build-app', async (event, sourceRoot) => {
             return resolve({ success: false, error: 'vnbuild not found. Generate config first.' });
         }
 
+        // --- PRE-BUILD CLEANUP & SAFETY ---
+        // 1. Identify executable name to kill any running instances
+        try {
+            const configFile = path.join(buildDir, 'visualneo.json');
+            if (fs.existsSync(configFile)) {
+                const conf = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+                const execName = conf.productName + ".exe";
+                sendLog(`Checking for running instances of ${execName}...`);
+                // Force kill any running instances of the app we are about to build
+                try {
+                    execSync(`taskkill /F /IM "${execName}"`, { stdio: 'ignore' });
+                    sendLog('Closed running application instance.');
+                } catch(e) { 
+                    // Ignore error if process wasn't running
+                }
+            }
+        } catch(e) {
+            sendLog('Warning: Could not check for running instances.', true);
+        }
+
+        // 2. Aggressively Clean DIST
+        const distPath = path.join(buildDir, 'dist');
+        if (fs.existsSync(distPath)) {
+            sendLog('Cleaning previous build artifacts...');
+            try {
+                await deleteFolderRobust(distPath);
+            } catch(e) {
+                sendLog(`Error cleaning dist folder: ${e.message}. Files might be locked.`, true);
+                return resolve({ success: false, error: 'Files Locked' });
+            }
+        }
+        
+        // --- BUILD START ---
         const buildEnv = getBuildEnv();
         const localPath = getLocalNodePath();
         
@@ -626,7 +653,6 @@ ipcMain.handle('build-app', async (event, sourceRoot) => {
                     }
 
                     // --- CLEANUP DIST FOLDER ROBUSTNESS ---
-                    // We delay slightly to allow file handles to release
                     setTimeout(async () => {
                         try {
                             sendLog('Cleaning up output artifacts...');
@@ -641,15 +667,10 @@ ipcMain.handle('build-app', async (event, sourceRoot) => {
                                 const files = fs.readdirSync(distPath);
                                 for (const f of files) {
                                     const fullPath = path.join(distPath, f);
-                                    
-                                    // 1. Remove Debug/Update metadata files
                                     if (junkExtensions.some(ext => f.endsWith(ext))) {
                                         try { fs.rmSync(fullPath, { force: true }); } catch(e) {}
                                     }
-
-                                    // 2. Remove unpacked folder if not requested
                                     if (f === 'win-unpacked' && !config.targetUnpacked) {
-                                        // Use robust delete here
                                         await deleteFolderRobust(fullPath);
                                     }
                                 }
@@ -659,9 +680,9 @@ ipcMain.handle('build-app', async (event, sourceRoot) => {
                             resolve({ success: true });
                         } catch(e) {
                             sendLog('Cleanup warning: ' + e.message, false);
-                            resolve({ success: true }); // Still count as success
+                            resolve({ success: true });
                         }
-                    }, 2000); // Wait 2s for handles to release
+                    }, 2000);
                 });
             });
         });
@@ -676,27 +697,15 @@ function generatePackageJson(c) {
   if (c.targetPortable) targets.push("portable");
   if (c.targetUnpacked) targets.push("dir");
 
-  // Extra Resources Logic
   const extraResources = [];
-  
   if (c.enablePhp) {
-      // PHP *MUST* be in extraResources to run (cannot run from ASAR)
-      // We put it in a folder named "php" next to the executable
       extraResources.push({ "from": "bin/php", "to": "php", "filter": ["**/*"] });
-  }
-  
-  // We also include WWW in extraResources IF we are using PHP, because PHP
-  // cannot read files inside ASAR.
-  // If using just Electron (no PHP), we keep WWW inside ASAR for security/speed.
-  if (c.enablePhp) {
       extraResources.push({ "from": "www", "to": "www_source", "filter": ["**/*"] });
   }
 
   const buildConfig = {
     appId: `com.visualneo.${c.appName.replace(/\s+/g, '').toLowerCase()}`,
     productName: c.productName,
-    // If PHP is enabled, we don't bundle www inside ASAR (we use extraResources)
-    // If PHP disabled, we bundle www inside main.js/asar
     files: c.enablePhp ? ["main.js"] : ["main.js", "www/**/*"], 
     extraResources: extraResources,
     directories: { "output": "dist" },
@@ -746,18 +755,12 @@ const CONFIG = {
 
 let mainWindow, tray = null, isQuitting = false, phpProcess = null, serverUrl = null;
 
-// --- PATH RESOLUTION ---
 const isDev = !app.isPackaged;
 const appDataDir = app.getPath('userData');
 const tempDir = app.getPath('temp');
 const instanceId = 'vneo-' + Date.now();
-
-// Resource Paths
-// In Prod: 'resources' folder is beside the exe.
-// In Dev: 'bin' folder is relative.
 const resourcesDir = isDev ? path.join(__dirname, 'bin') : process.resourcesPath;
 
-// --- HELPERS ---
 function syncDir(src, dest) {
   if (!fs.existsSync(src)) return;
   if (!fs.existsSync(dest)) fs.mkdirSync(dest, { recursive: true });
@@ -771,7 +774,6 @@ function syncDir(src, dest) {
   });
 }
 
-// --- STATE ---
 const statePath = path.join(appDataDir, 'window-state.json');
 function loadState() {
   try { return JSON.parse(fs.readFileSync(statePath, 'utf8')); } 
@@ -783,12 +785,9 @@ function saveState() {
   fs.writeFileSync(statePath, JSON.stringify({ ...bounds, isMaximized: mainWindow.isMaximized() }));
 }
 
-// --- RUNTIME SETUP ---
 async function setupEnvironment() {
-    // If PHP is NOT used, we serve static files from internal ASAR or file protocol.
     if (!CONFIG.usePhp) return { docRoot: null, phpDir: null };
 
-    // If PHP IS used, we MUST extract files because PHP.exe cannot read inside app.asar.
     let runtimeRoot;
     if (CONFIG.dataMode === 'writable') {
         runtimeRoot = path.join(appDataDir, 'server_root');
@@ -796,17 +795,11 @@ async function setupEnvironment() {
         runtimeRoot = path.join(tempDir, CONFIG.title.replace(/\\W/g,''), instanceId);
     }
 
-    // 1. Locate PHP (Must be in resources/php)
     const phpSource = path.join(resourcesDir, 'php');
-    
-    // 2. Locate WWW Source
-    // In Dev: __dirname/www
-    // In Prod: resources/www_source (because we put it in extraResources in package.json)
     const wwwSource = isDev ? path.join(__dirname, 'www') : path.join(resourcesDir, 'www_source');
 
     if (!fs.existsSync(phpSource)) throw new Error("PHP Runtime missing in resources.");
 
-    // Extract/Update files
     try {
         syncDir(wwwSource, runtimeRoot);
     } catch (e) {
@@ -827,7 +820,6 @@ async function startPhpServer() {
 
       if (!fs.existsSync(phpExe)) return reject(new Error("PHP.exe not found at: " + phpExe));
 
-      // Spawn PHP on Port 0
       phpProcess = spawn(phpExe, ['-S', '127.0.0.1:0', '-t', env.docRoot, '-c', phpIni], {
         cwd: env.docRoot,
         windowsHide: true
@@ -856,11 +848,8 @@ async function startPhpServer() {
 function killPhp() {
   if (phpProcess) {
     try {
-        // Force kill using Taskkill (Blocking) to ensure no leftovers
         execSync(\`taskkill /pid \${phpProcess.pid} /f /t\`);
-    } catch(e) {
-        // Process might already be dead
-    }
+    } catch(e) {}
     phpProcess = null;
   }
 }
@@ -875,6 +864,7 @@ function createWindow() {
     kiosk: CONFIG.kiosk, frame: CONFIG.nativeFrame, center: ${c.center},
     autoHideMenuBar: true, show: false,
     skipTaskbar: !CONFIG.showTaskbar,
+    title: CONFIG.title,
     backgroundColor: '#121212',
     webPreferences: { nodeIntegration: false, contextIsolation: true, devTools: ${c.devTools} }
   };
@@ -888,20 +878,31 @@ function createWindow() {
   if (CONFIG.usePhp && serverUrl) {
     mainWindow.loadURL(serverUrl + CONFIG.entry);
   } else {
-    // Static Mode (Internal ASAR)
     mainWindow.loadFile(path.join(__dirname, 'www', CONFIG.entry));
   }
   
   ${c.userAgent ? `mainWindow.webContents.setUserAgent("${c.userAgent}");` : ''}
   mainWindow.once('ready-to-show', () => mainWindow.show());
 
+  // Tray Logic: Minimize
+  mainWindow.on('minimize', (e) => {
+    if (CONFIG.minToTray && tray) {
+        e.preventDefault();
+        mainWindow.hide();
+    }
+  });
+
+  // Tray Logic: Close
   mainWindow.on('close', (e) => {
     if (CONFIG.saveState) saveState();
-    // Close to Tray Logic
-    if ((CONFIG.minToTray || CONFIG.closeToTray) && tray && !isQuitting) {
+    
+    if (CONFIG.closeToTray && tray && !isQuitting) {
       e.preventDefault();
       mainWindow.hide();
+      return; 
     }
+    
+    // Normal Close
   });
   
   if (CONFIG.contextMenu) {
