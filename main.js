@@ -23,26 +23,60 @@ function copyFolderRecursiveSync(source, target) {
   }
 }
 
-function downloadFile(url, dest, cb) {
-  const file = fs.createWriteStream(dest);
-  https.get(url, (response) => {
-    if (response.statusCode !== 200) {
-      cb(`Download failed. Status Code: ${response.statusCode}`);
-      return;
-    }
-    response.pipe(file);
-    file.on('finish', () => {
-      file.close(cb);
+function downloadFile(url, dest, onProgress) {
+  return new Promise((resolve, reject) => {
+    const request = https.get(url, (response) => {
+      // Handle Redirects
+      if (response.statusCode === 301 || response.statusCode === 302) {
+        downloadFile(response.headers.location, dest, onProgress)
+          .then(resolve)
+          .catch(reject);
+        return;
+      }
+
+      if (response.statusCode !== 200) {
+        reject(new Error(`Failed to download. Status Code: ${response.statusCode}`));
+        return;
+      }
+
+      const totalLength = parseInt(response.headers['content-length'], 10);
+      let downloadedLength = 0;
+
+      const file = fs.createWriteStream(dest);
+      
+      response.on('data', (chunk) => {
+        downloadedLength += chunk.length;
+        file.write(chunk);
+        if (totalLength && onProgress) {
+          const percent = (downloadedLength / totalLength) * 100;
+          onProgress(percent, downloadedLength, totalLength);
+        }
+      });
+
+      response.on('end', () => {
+        file.end();
+        resolve();
+      });
+
+      response.on('error', (err) => {
+        fs.unlink(dest, () => {});
+        reject(err);
+      });
     });
-  }).on('error', (err) => {
-    fs.unlink(dest, () => {});
-    cb(err.message);
+
+    request.on('error', (err) => {
+      fs.unlink(dest, () => {});
+      reject(err);
+    });
   });
 }
 
 function extractZip(source, target) {
   return new Promise((resolve, reject) => {
     let command;
+    // Ensure target exists
+    if (!fs.existsSync(target)) fs.mkdirSync(target, { recursive: true });
+
     if (process.platform === 'win32') {
       // PowerShell unzip
       command = `powershell -command "Expand-Archive -Path '${source}' -DestinationPath '${target}' -Force"`;
@@ -61,17 +95,36 @@ function extractZip(source, target) {
   });
 }
 
+async function verifyPhp(phpDir) {
+  const phpExe = process.platform === 'win32' ? 'php.exe' : 'php';
+  const phpPath = path.join(phpDir, phpExe);
+  
+  if (!fs.existsSync(phpPath)) {
+    throw new Error("Verification Failed: php.exe not found in extracted folder.");
+  }
+
+  return new Promise((resolve, reject) => {
+    exec(`"${phpPath}" -v`, (err, stdout) => {
+      if (err) reject(new Error("Verification Failed: php executable is corrupt or incompatible."));
+      if (stdout.includes('PHP')) resolve(true);
+      else reject(new Error("Verification Failed: Unexpected output from PHP."));
+    });
+  });
+}
+
 // --- MAIN PROCESS ---
 
+let mainWindow;
+
 const createWindow = () => {
-  const mainWindow = new BrowserWindow({
+  mainWindow = new BrowserWindow({
     width: 1200,
     height: 900,
     minWidth: 900,
     minHeight: 600,
     backgroundColor: '#121212',
-    frame: true, // Native Window Frame (Fixes drag/resize issues)
-    autoHideMenuBar: true, // Hides File/Edit menu
+    frame: true, 
+    autoHideMenuBar: true, 
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
@@ -81,7 +134,7 @@ const createWindow = () => {
   });
 
   mainWindow.loadFile('index.html');
-  mainWindow.setMenu(null); // Explicitly remove menu
+  mainWindow.setMenu(null); 
 };
 
 app.on('ready', createWindow);
@@ -113,12 +166,12 @@ ipcMain.handle('select-file', async (event, extensions) => {
 
 ipcMain.handle('download-php', async (event, version) => {
   try {
-    // 1. Define Source URLs (Windows NTS x64 is standard for automation)
-    // Note: These links can change if archived. 
+    // Updated Links (Checked for validity)
+    // We use specific versions that are currently stable. 
     const versions = {
-      '8.3': 'https://windows.php.net/downloads/releases/php-8.3.4-nts-Win32-vs16-x64.zip',
-      '8.2': 'https://windows.php.net/downloads/releases/php-8.2.17-nts-Win32-vs16-x64.zip',
-      '8.1': 'https://windows.php.net/downloads/releases/archives/php-8.1.27-nts-Win32-vs16-x64.zip'
+      '8.3': 'https://windows.php.net/downloads/releases/php-8.3.12-nts-Win32-vs16-x64.zip',
+      '8.2': 'https://windows.php.net/downloads/releases/php-8.2.24-nts-Win32-vs16-x64.zip',
+      '8.1': 'https://windows.php.net/downloads/releases/archives/php-8.1.29-nts-Win32-vs16-x64.zip'
     };
 
     const url = versions[version];
@@ -130,20 +183,24 @@ ipcMain.handle('download-php', async (event, version) => {
     const zipPath = path.join(cacheDir, `php-${version}.zip`);
     const extractPath = path.join(cacheDir, `php-${version}`);
 
-    // 2. Download
-    if (!fs.existsSync(zipPath)) {
-      await new Promise((resolve, reject) => {
-         downloadFile(url, zipPath, (err) => {
-           if (err) reject(err);
-           else resolve();
-         });
-      });
+    // 1. Download
+    // Always re-download if file is small (corrupt) or doesn't exist
+    if (!fs.existsSync(zipPath) || fs.statSync(zipPath).size < 1000000) {
+       await downloadFile(url, zipPath, (percent, current, total) => {
+         mainWindow.webContents.send('download-progress', { percent, current, total, status: 'Downloading...' });
+       });
     }
 
-    // 3. Extract
-    if (!fs.existsSync(extractPath)) {
-      await extractZip(zipPath, extractPath);
+    // 2. Extract
+    mainWindow.webContents.send('download-progress', { percent: 100, status: 'Extracting archive...' });
+    if (fs.existsSync(extractPath)) {
+      fs.rmSync(extractPath, { recursive: true, force: true });
     }
+    await extractZip(zipPath, extractPath);
+
+    // 3. Verify
+    mainWindow.webContents.send('download-progress', { percent: 100, status: 'Verifying installation...' });
+    await verifyPhp(extractPath);
 
     return { success: true, path: extractPath };
 
@@ -160,7 +217,6 @@ ipcMain.handle('generate-app', async (event, config) => {
     if (config.enablePhp && config.phpPath) {
        const phpDest = path.join(targetDir, 'bin', 'php');
        if (fs.existsSync(phpDest)) {
-         // Clean previous
          fs.rmSync(phpDest, { recursive: true, force: true });
        }
        fs.mkdirSync(path.join(targetDir, 'bin'), { recursive: true });
@@ -170,10 +226,8 @@ ipcMain.handle('generate-app', async (event, config) => {
        
        // Generate custom php.ini
        let extensionStr = '';
-       // Basic logic to determine extension dir (Windows usually 'ext')
        extensionStr += `extension_dir = "ext"\n`;
        
-       // Config.phpExtensions is now an array
        config.phpExtensions.forEach(ext => {
          extensionStr += `extension=php_${ext}.dll\n`;
        });
@@ -238,7 +292,6 @@ function generatePackageJson(c) {
   if (c.targetPortable) targets.push("portable");
   if (c.targetUnpacked) targets.push("dir");
 
-  // Extra resources logic for PHP
   const extraResources = [];
   if (c.enablePhp) {
     extraResources.push({

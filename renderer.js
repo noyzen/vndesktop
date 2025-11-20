@@ -89,26 +89,56 @@ function toggleExtension(ext) {
 renderExtensions();
 
 // --- DOWNLOADER LOGIC ---
+
+// Progress Logic Listener
+window.electron = window.electron || {}; // Safety check
+
+if (window.api) { // Ensure API exists
+    const { ipcRenderer } = require('electron');
+    ipcRenderer.on('download-progress', (event, data) => {
+        const modal = document.getElementById('progressModal');
+        const bar = document.getElementById('progressBar');
+        const percentTxt = document.getElementById('progressPercent');
+        const sizeTxt = document.getElementById('progressSize');
+        const detailTxt = document.getElementById('progressDetail');
+
+        modal.classList.add('active');
+        
+        const percentage = Math.round(data.percent);
+        bar.style.width = `${percentage}%`;
+        percentTxt.innerText = `${percentage}%`;
+        detailTxt.innerText = data.status || 'Processing...';
+
+        if(data.total) {
+            const currentMB = (data.current / (1024 * 1024)).toFixed(1);
+            const totalMB = (data.total / (1024 * 1024)).toFixed(1);
+            sizeTxt.innerText = `${currentMB}/${totalMB} MB`;
+        }
+    });
+}
+
 document.getElementById('btnDownloadPhp').addEventListener('click', async () => {
   const version = document.getElementById('phpVersionSelect').value;
-  log(`Starting download for PHP ${version}... Please wait.`, 'info');
+  const modal = document.getElementById('progressModal');
   
-  document.getElementById('btnDownloadPhp').disabled = true;
-  document.getElementById('btnDownloadPhp').innerText = "Downloading...";
+  log(`Initializing download for PHP ${version}...`, 'info');
   
   try {
     const result = await window.api.downloadPhp(version);
+    
+    modal.classList.remove('active'); // Hide modal
+    
     if (result.success) {
       document.getElementById('phpPath').value = result.path;
-      log(`PHP ${version} installed successfully at: ${result.path}`, 'success');
+      log(`PHP ${version} installed & verified!`, 'success');
+      alert(`PHP ${version} downloaded, verified, and ready!`);
     } else {
       log(`Download Error: ${result.error}`, 'error');
+      alert(`Error: ${result.error}`);
     }
   } catch (e) {
+    modal.classList.remove('active');
     log(`Error: ${e.message}`, 'error');
-  } finally {
-    document.getElementById('btnDownloadPhp').disabled = false;
-    document.getElementById('btnDownloadPhp').innerHTML = '<i class="fa-solid fa-cloud-arrow-down"></i> Download & Install';
   }
 });
 
