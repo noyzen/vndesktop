@@ -14,27 +14,75 @@ const portfinder = require('portfinder');
 async function deleteFolderRobust(targetPath, isBackground = false) {
     if (!fs.existsSync(targetPath)) return;
     
-    const maxRetries = 15; // Increased retries
+    // Helper to check existence
+    const exists = () => fs.existsSync(targetPath);
+
+    const maxRetries = 10; 
     for (let i = 0; i < maxRetries; i++) {
         try {
-            fs.rmSync(targetPath, { recursive: true, force: true });
-            return; // Success
+            // 1. Node.js Native Delete
+            try {
+                fs.rmSync(targetPath, { recursive: true, force: true });
+                if (!exists()) return;
+            } catch(e) {}
+
+            // 2. Windows Shell Force Delete (often bypasses minor locks)
+            if (process.platform === 'win32') {
+                try {
+                    execSync(`rmdir /s /q "${targetPath}"`, { stdio: 'ignore' });
+                    if (!exists()) return;
+                } catch(e) {}
+            }
+            
+            if (!exists()) return;
+
+            // If it's the last retry, throw
+            if (i === maxRetries - 1) throw new Error("Resource locked or permission denied.");
+
+            // Backoff: 100ms, 200ms...
+            const delay = 100 * Math.pow(1.5, i);
+            await new Promise(resolve => setTimeout(resolve, delay));
+
         } catch (e) {
             if (i === maxRetries - 1) {
                 if (!isBackground) console.error(`Failed to delete ${targetPath}: ${e.message}`);
                 if (!isBackground) throw e;
-            } else {
-                // Exponential backoff: 50, 100, 200, 400... up to ~1.5s waits
-                const delay = 50 * Math.pow(1.5, i);
-                await new Promise(resolve => setTimeout(resolve, delay));
             }
         }
     }
 }
 
-// Clever "Move to Trash" strategy for build folders
-// If we can't delete 'dist', we rename it to 'dist_old_TIMESTAMP' so the build can proceed.
-// We attempt to delete the trash later, but if it fails, it doesn't block the user.
+// Clever "Move to Trash" strategy
+// 1. Try System Temp (Cleanest, hides it from user)
+// 2. Try Hidden Local Trash (Keeps dist clean)
+function forceMoveToTrash(targetPath) {
+    const name = `trash_${path.basename(targetPath)}_${Date.now()}`;
+    
+    // Strategy A: System Temp
+    try {
+        const tempDest = path.join(app.getPath('temp'), name);
+        fs.renameSync(targetPath, tempDest);
+        return tempDest; 
+    } catch (e) { /* EXDEV or perms */ }
+
+    // Strategy B: Hidden local trash (outside dist)
+    try {
+        // Assuming targetPath is .../vnbuild/dist/folder
+        // We want .../vnbuild/.trash/folder
+        const distDir = path.dirname(targetPath); 
+        const buildDir = path.dirname(distDir);   
+        const trashDir = path.join(buildDir, '.trash');
+        
+        if (!fs.existsSync(trashDir)) fs.mkdirSync(trashDir);
+        
+        const localDest = path.join(trashDir, name);
+        fs.renameSync(targetPath, localDest);
+        return localDest;
+    } catch (e) {
+        return null;
+    }
+}
+
 async function prepareDistFolder(buildDir, sendLog) {
     const distPath = path.join(buildDir, 'dist');
     if (!fs.existsSync(distPath)) return true;
@@ -42,25 +90,20 @@ async function prepareDistFolder(buildDir, sendLog) {
     sendLog("Cleaning output directory...");
 
     try {
-        // Try standard delete first
         await deleteFolderRobust(distPath);
         return true;
     } catch (e) {
         sendLog("Standard clean failed (Locked). Attempting displacement strategy...");
         
-        // Strategy: Rename
-        const trashName = `dist_trash_${Date.now()}`;
-        const trashPath = path.join(buildDir, trashName);
+        const trashPath = forceMoveToTrash(distPath);
         
-        try {
-            fs.renameSync(distPath, trashPath);
-            sendLog(`Moved locked folder to ${trashName}. Build path is clear.`);
-            
+        if (trashPath) {
+            sendLog(`Moved locked folder to trash area. Build path is clear.`);
             // Fire and forget delete of the trash
             deleteFolderRobust(trashPath, true).catch(() => {});
             return true;
-        } catch (renameErr) {
-            sendLog(`Critical: Could not move locked folder. Error: ${renameErr.message}`, true);
+        } else {
+            sendLog(`Critical: Could not move locked folder.`, true);
             return false;
         }
     }
@@ -644,7 +687,6 @@ ipcMain.handle('build-app', async (event, sourceRoot) => {
         }
 
         // --- STEP 2: PREPARE DIST (RENAME STRATEGY) ---
-        // This is the fix for ENOTEMPTY / Locked Files
         const distCleaned = await prepareDistFolder(buildDir, sendLog);
         if (!distCleaned) {
             return resolve({ success: false, error: 'Output folder is locked by System/Antivirus.' });
@@ -704,19 +746,19 @@ ipcMain.handle('build-app', async (event, sourceRoot) => {
                                     const fullPath = path.join(distPath, f);
                                     // Remove builder metadata files
                                     if (junkExtensions.some(ext => f.endsWith(ext))) {
-                                        try { fs.rmSync(fullPath, { force: true }); } catch(e) {}
+                                        try { deleteFolderRobust(fullPath, true); } catch(e) {}
                                     }
+                                    
                                     // Remove unpacked folder if user didn't request it
                                     if (f === 'win-unpacked' && !config.targetUnpacked) {
-                                        // Use same rename-then-delete strategy for win-unpacked
-                                        const trashName = `unpacked_trash_${Date.now()}`;
-                                        const trashPath = path.join(distPath, trashName);
                                         try {
-                                            fs.renameSync(fullPath, trashPath);
-                                            deleteFolderRobust(trashPath, true); // background
-                                        } catch (renameErr) {
-                                            // If rename fails, try force delete
-                                            await deleteFolderRobust(fullPath); 
+                                            await deleteFolderRobust(fullPath);
+                                        } catch (delErr) {
+                                            // If failed, displace it to trash
+                                            const trashPath = forceMoveToTrash(fullPath);
+                                            if (trashPath) {
+                                                deleteFolderRobust(trashPath, true).catch(()=>{});
+                                            }
                                         }
                                     }
                                 }
@@ -728,7 +770,7 @@ ipcMain.handle('build-app', async (event, sourceRoot) => {
                             sendLog('Cleanup warning (minor): ' + e.message, false);
                             resolve({ success: true });
                         }
-                    }, 2000); // Wait 2s for file handles to release
+                    }, 3000); // Wait 3s for file handles to release
                 });
             });
         });
