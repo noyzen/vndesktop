@@ -8,6 +8,8 @@ const projectListEl = document.getElementById('projectList');
 const buildOverlay = document.getElementById('build-overlay');
 const overlayLog = document.getElementById('overlay-log');
 const successModal = document.getElementById('successModal');
+const btnOpenDist = document.getElementById('btnOpenDist');
+const btnCloseSuccess = document.getElementById('btnCloseSuccess');
 
 // Navigation
 const tabs = document.querySelectorAll('.nav-item');
@@ -62,7 +64,11 @@ async function renderProjectList() {
     projectListEl.innerHTML = '';
     
     if(projects.length === 0) {
-        projectListEl.innerHTML = '<div style="text-align:center; color:#555; padding:40px;">No projects found.<br>Start something new!</div>';
+        projectListEl.innerHTML = `
+            <div style="text-align:center; color:#555; padding:40px; background:rgba(255,255,255,0.02); border-radius:16px; border:2px dashed var(--border);">
+                <i class="fa-solid fa-folder-open" style="font-size:2rem; margin-bottom:15px; opacity:0.5;"></i><br>
+                No projects found.<br>Start something new!
+            </div>`;
         return;
     }
 
@@ -71,12 +77,14 @@ async function renderProjectList() {
         el.className = 'project-card';
         if(idx === 0) el.classList.add('last-used');
         el.innerHTML = `
-            <div>
-                <div style="color:white; font-weight:600; font-size:1.05rem;">${p.name}</div>
-                <div style="color:#666; font-size:0.85rem; font-family:monospace;">${p.path}</div>
+            <div class="project-info">
+                <div style="color:white; font-weight:600; font-size:1.1rem;">${p.name}</div>
+                <div style="color:#666; font-size:0.85rem; font-family:'Consolas', monospace; margin-top:4px;">${p.path}</div>
             </div>
-            <div style="display:flex; gap:10px;">
-                 <button class="secondary" style="padding:5px 10px;" onclick="deleteProject(event, ${p.id})"><i class="fa-solid fa-times"></i></button>
+            <div style="display:flex; gap:10px; align-items:center;">
+                 <button class="btn-delete-project" title="Remove from List" onclick="deleteProject(event, ${p.id})">
+                    <i class="fa-solid fa-trash-alt"></i>
+                 </button>
             </div>
         `;
         el.onclick = (e) => { if(!e.target.closest('button')) openProject(p.path); }
@@ -183,14 +191,21 @@ function renderExtensions() {
     common.forEach(ext => {
         const label = document.createElement('label');
         label.className = 'checkbox-card';
+        
         const chk = document.createElement('input');
         chk.type = 'checkbox';
         chk.checked = selectedExtensions.has(ext);
         chk.onchange = () => { if(chk.checked) selectedExtensions.add(ext); else selectedExtensions.delete(ext); };
         
-        label.appendChild(chk);
+        // Custom styled checkbox elements
+        const customCheck = document.createElement('span');
+        customCheck.className = 'custom-check';
+        
         const span = document.createElement('span');
         span.innerText = ext;
+        
+        label.appendChild(chk);
+        label.appendChild(customCheck);
         label.appendChild(span);
         grid.appendChild(label);
     });
@@ -330,6 +345,8 @@ document.getElementById('btnBuildFull').onclick = async () => {
         
         if(buildRes.success) {
             successModal.classList.add('active');
+            // Set click handler for the success modal button
+            btnOpenDist.onclick = () => window.api.openDistFolder(config.sourcePath);
         } else {
             alert('Build Failed. Check log.');
         }
@@ -338,6 +355,11 @@ document.getElementById('btnBuildFull').onclick = async () => {
         alert('Error: ' + e.message);
         log(e.message, 'error');
     }
+};
+
+// Close Modal
+btnCloseSuccess.onclick = () => {
+    successModal.classList.remove('active');
 };
 
 // --- AUXILIARY HANDLERS ---
