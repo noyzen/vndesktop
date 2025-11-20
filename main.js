@@ -1,5 +1,5 @@
 
-const { app, BrowserWindow, ipcMain, dialog, clipboard } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, clipboard, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const https = require('https');
@@ -213,6 +213,15 @@ ipcMain.handle('copy-to-clipboard', async (event, text) => {
   return true;
 });
 
+ipcMain.handle('open-dist-folder', async (event, projectPath) => {
+    const distPath = path.join(projectPath, 'vnbuild', 'dist');
+    if (fs.existsSync(distPath)) {
+        await shell.openPath(distPath);
+        return true;
+    }
+    return false;
+});
+
 // Project Manager Handlers
 ipcMain.handle('get-projects', () => getProjectsList());
 
@@ -347,12 +356,14 @@ ipcMain.handle('generate-app', async (event, config) => {
     const buildDir = path.join(sourceRoot, 'vnbuild');
     const wwwDir = path.join(buildDir, 'www');
     const binDir = path.join(buildDir, 'bin');
+    const distDir = path.join(buildDir, 'dist');
     
     if (!fs.existsSync(buildDir)) fs.mkdirSync(buildDir, { recursive: true });
     
-    // Clean previous build files but keep node_modules if it exists
+    // Clean previous build files
     if (fs.existsSync(wwwDir)) fs.rmSync(wwwDir, { recursive: true, force: true });
     if (fs.existsSync(binDir)) fs.rmSync(binDir, { recursive: true, force: true });
+    if (fs.existsSync(distDir)) fs.rmSync(distDir, { recursive: true, force: true });
 
     const exclusions = ['vnbuild', '.git', '.vscode', 'node_modules', 'dist', 'release', 'out'];
     fs.mkdirSync(wwwDir, { recursive: true });

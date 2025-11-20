@@ -12,6 +12,14 @@ const phpToggle = document.getElementById('enablePhp');
 const phpPanel = document.getElementById('phpPanel');
 const phpDisabledMsg = document.getElementById('phpDisabledMsg');
 
+// Build Options Checkboxes
+const chkNsis = document.getElementById('targetNsis');
+const chkPortable = document.getElementById('targetPortable');
+const chkUnpacked = document.getElementById('targetUnpacked');
+
+// Modals
+const successModal = document.getElementById('successModal');
+
 // Project State
 let currentProjectPath = null;
 let selectedExtensions = new Set(['curl', 'gd', 'mbstring', 'sqlite3', 'openssl']);
@@ -160,13 +168,40 @@ tabs.forEach(tab => {
   });
 });
 
+// PHP Toggle & Output Format Logic
 phpToggle.addEventListener('change', () => {
   if(phpToggle.checked) {
+    // Show PHP Panel
     phpPanel.classList.remove('hidden');
     phpDisabledMsg.classList.add('hidden');
+
+    // Fix: Auto-populate path if cached version exists and input is empty
+    const currentVer = document.getElementById('phpVersionSelect').value;
+    const currentPathInput = document.getElementById('phpPath');
+    if (!currentPathInput.value && phpCache[currentVer]) {
+        currentPathInput.value = phpCache[currentVer];
+        updatePhpUiState();
+    }
+
+    // Force Output to Portable Folder Only (to support dynamic PHP files)
+    chkUnpacked.checked = true;
+    chkUnpacked.disabled = true;
+    
+    chkNsis.checked = false;
+    chkNsis.disabled = true;
+    
+    chkPortable.checked = false;
+    chkPortable.disabled = true;
+
   } else {
+    // Hide PHP Panel
     phpPanel.classList.add('hidden');
     phpDisabledMsg.classList.remove('hidden');
+
+    // Restore Output Options
+    chkUnpacked.disabled = false;
+    chkNsis.disabled = false;
+    chkPortable.disabled = false;
   }
 });
 
@@ -313,6 +348,16 @@ document.getElementById('btnSelectIcon').addEventListener('click', async () => {
   if (path) document.getElementById('iconPath').value = path;
 });
 
+// Success Modal Handlers
+document.getElementById('btnOpenDist').addEventListener('click', async () => {
+    if (currentProjectPath) {
+        await window.api.openDistFolder(currentProjectPath);
+    }
+});
+document.getElementById('btnCloseSuccess').addEventListener('click', () => {
+    successModal.classList.remove('active');
+});
+
 // Form Helper
 function resetForm() {
     document.getElementById('appName').value = 'my-electron-app';
@@ -332,6 +377,12 @@ function resetForm() {
     selectedExtensions = new Set(['curl', 'gd', 'mbstring', 'sqlite3', 'openssl']);
     renderExtensions();
     document.getElementById('extraExtensions').value = '';
+    
+    // Reset output checks
+    chkNsis.checked = true;
+    chkPortable.checked = true;
+    chkUnpacked.checked = false;
+
     phpToggle.dispatchEvent(new Event('change'));
 }
 
@@ -371,9 +422,9 @@ function populateForm(c) {
     document.getElementById('userAgent').value = c.userAgent || '';
     document.getElementById('iconPath').value = c.iconPath || '';
     
-    document.getElementById('targetNsis').checked = c.targetNsis;
-    document.getElementById('targetPortable').checked = c.targetPortable;
-    document.getElementById('targetUnpacked').checked = c.targetUnpacked;
+    chkNsis.checked = c.targetNsis;
+    chkPortable.checked = c.targetPortable;
+    chkUnpacked.checked = c.targetUnpacked;
     
     phpToggle.dispatchEvent(new Event('change'));
 }
@@ -422,22 +473,13 @@ function getAppConfig() {
     contextMenu: document.getElementById('contextMenu').checked,
     userAgent: document.getElementById('userAgent').value,
     iconPath: document.getElementById('iconPath').value,
-    targetNsis: document.getElementById('targetNsis').checked,
-    targetPortable: document.getElementById('targetPortable').checked,
-    targetUnpacked: document.getElementById('targetUnpacked').checked,
+    targetNsis: chkNsis.checked,
+    targetPortable: chkPortable.checked,
+    targetUnpacked: chkUnpacked.checked,
   };
 }
 
 // Actions
-document.getElementById('btnGenerateOnly').addEventListener('click', async () => {
-  const config = getAppConfig();
-  if(!config) return;
-  await window.api.saveProjectConfig(currentProjectPath, config);
-  const result = await window.api.generateApp(config);
-  if (result.success) log('Configuration Generated.', 'success');
-  else log(`Error: ${result.error}`, 'error');
-});
-
 document.getElementById('btnBuildFull').addEventListener('click', async () => {
   const config = getAppConfig();
   if(!config) return;
@@ -456,7 +498,7 @@ document.getElementById('btnBuildFull').addEventListener('click', async () => {
     const result = await window.api.buildApp(config.sourcePath);
     if (result.success) {
        log('BUILD COMPLETED!', 'success');
-       alert('Build Complete!');
+       successModal.classList.add('active');
     } else {
        log('BUILD FAILED.', 'error');
     }

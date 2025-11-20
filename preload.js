@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('api', {
   buildApp: (targetPath) => ipcRenderer.invoke('build-app', targetPath),
   getPhpCache: () => ipcRenderer.invoke('get-php-cache'),
   copyToClipboard: (text) => ipcRenderer.invoke('copy-to-clipboard', text),
+  openDistFolder: (path) => ipcRenderer.invoke('open-dist-folder', path),
   onDownloadProgress: (callback) => ipcRenderer.on('download-progress', (_event, value) => callback(value)),
   
   // Project Manager
